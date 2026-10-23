@@ -1,0 +1,13 @@
+# Agent plugin & extension manifests
+.claude-plugin/
+plugin.json
+gemini-extension.json
+
+# Environment & local config
+.env
+.env.*
+
+# OS & temporary files
+.DS_Store
+__pycache__/
+*.pyc

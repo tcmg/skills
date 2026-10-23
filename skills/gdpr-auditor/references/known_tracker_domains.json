@@ -1,0 +1,183 @@
+{
+  "tracker_domains": [
+    {
+      "domain": "google-analytics.com",
+      "vendor": "Google Analytics (GA4 / UA)",
+      "category": "Analytics",
+      "requires_consent": true,
+      "gdpr_reference": "ePrivacy Art. 5(3) & GDPR Art. 6(1)(a)"
+    },
+    {
+      "domain": "googletagmanager.com",
+      "vendor": "Google Tag Manager",
+      "category": "Tag Manager / Analytics",
+      "requires_consent": true,
+      "gdpr_reference": "ePrivacy Art. 5(3) & GDPR Art. 6(1)(a)"
+    },
+    {
+      "domain": "doubleclick.net",
+      "vendor": "Google Ads / DoubleClick",
+      "category": "Advertising",
+      "requires_consent": true,
+      "gdpr_reference": "ePrivacy Art. 5(3) & GDPR Art. 6(1)(a)"
+    },
+    {
+      "domain": "connect.facebook.net",
+      "vendor": "Meta Pixel",
+      "category": "Advertising",
+      "requires_consent": true,
+      "gdpr_reference": "ePrivacy Art. 5(3) & GDPR Art. 6(1)(a)"
+    },
+    {
+      "domain": "facebook.com/tr",
+      "vendor": "Meta Pixel Beacon",
+      "category": "Advertising",
+      "requires_consent": true,
+      "gdpr_reference": "ePrivacy Art. 5(3) & GDPR Art. 6(1)(a)"
+    },
+    {
+      "domain": "analytics.tiktok.com",
+      "vendor": "TikTok Pixel",
+      "category": "Advertising",
+      "requires_consent": true,
+      "gdpr_reference": "ePrivacy Art. 5(3) & GDPR Art. 6(1)(a)"
+    },
+    {
+      "domain": "snap.licdn.com",
+      "vendor": "LinkedIn Insight Tag",
+      "category": "Advertising",
+      "requires_consent": true,
+      "gdpr_reference": "ePrivacy Art. 5(3) & GDPR Art. 6(1)(a)"
+    },
+    {
+      "domain": "api.segment.io",
+      "vendor": "Twilio Segment",
+      "category": "Customer Data Platform / Analytics",
+      "requires_consent": true,
+      "gdpr_reference": "ePrivacy Art. 5(3) & GDPR Art. 6(1)(a)"
+    },
+    {
+      "domain": "cdn.segment.com",
+      "vendor": "Twilio Segment CDN",
+      "category": "Customer Data Platform / Analytics",
+      "requires_consent": true,
+      "gdpr_reference": "ePrivacy Art. 5(3) & GDPR Art. 6(1)(a)"
+    },
+    {
+      "domain": "api.mixpanel.com",
+      "vendor": "Mixpanel",
+      "category": "Product Analytics",
+      "requires_consent": true,
+      "gdpr_reference": "ePrivacy Art. 5(3) & GDPR Art. 6(1)(a)"
+    },
+    {
+      "domain": "api2.amplitude.com",
+      "vendor": "Amplitude",
+      "category": "Product Analytics",
+      "requires_consent": true,
+      "gdpr_reference": "ePrivacy Art. 5(3) & GDPR Art. 6(1)(a)"
+    },
+    {
+      "domain": "app.posthog.com",
+      "vendor": "PostHog (US Cloud)",
+      "category": "Product Analytics / Session Replay",
+      "requires_consent": true,
+      "gdpr_reference": "ePrivacy Art. 5(3) & GDPR Art. 44 (US Transfer)"
+    },
+    {
+      "domain": "eu.posthog.com",
+      "vendor": "PostHog (EU Cloud)",
+      "category": "Product Analytics / Session Replay",
+      "requires_consent": true,
+      "gdpr_reference": "ePrivacy Art. 5(3) (unless configured strictly cookieless)"
+    },
+    {
+      "domain": "static.hotjar.com",
+      "vendor": "Hotjar",
+      "category": "Session Replay / Heatmaps",
+      "requires_consent": true,
+      "gdpr_reference": "ePrivacy Art. 5(3) & GDPR Art. 6(1)(a)"
+    },
+    {
+      "domain": "clarity.ms",
+      "vendor": "Microsoft Clarity",
+      "category": "Session Replay / Heatmaps",
+      "requires_consent": true,
+      "gdpr_reference": "ePrivacy Art. 5(3) & GDPR Art. 6(1)(a)"
+    },
+    {
+      "domain": "fullstory.com",
+      "vendor": "FullStory",
+      "category": "Session Replay",
+      "requires_consent": true,
+      "gdpr_reference": "ePrivacy Art. 5(3) & GDPR Art. 6(1)(a)"
+    },
+    {
+      "domain": "js.hs-scripts.com",
+      "vendor": "HubSpot Tracking",
+      "category": "Marketing Automation",
+      "requires_consent": true,
+      "gdpr_reference": "ePrivacy Art. 5(3) & GDPR Art. 6(1)(a)"
+    },
+    {
+      "domain": "widget.intercom.io",
+      "vendor": "Intercom",
+      "category": "Customer Support / Tracking",
+      "requires_consent": true,
+      "gdpr_reference": "ePrivacy Art. 5(3) (sets non-essential cookies on load if not lazy-loaded)"
+    },
+    {
+      "domain": "fonts.googleapis.com",
+      "vendor": "Google Fonts API",
+      "category": "Third-Party Asset CDN (IP Leakage)",
+      "requires_consent": true,
+      "gdpr_reference": "GDPR Art. 6(1) (LG München Ruling Az. 3 O 17493/20: dynamic IP transmission to Google without consent is unlawful; self-host fonts instead)"
+    },
+    {
+      "domain": "fonts.gstatic.com",
+      "vendor": "Google Fonts Static",
+      "category": "Third-Party Asset CDN (IP Leakage)",
+      "requires_consent": true,
+      "gdpr_reference": "GDPR Art. 6(1) (LG München Ruling Az. 3 O 17493/20: self-host web fonts)"
+    },
+    {
+      "domain": "use.typekit.net",
+      "vendor": "Adobe Fonts (Typekit)",
+      "category": "Third-Party Asset CDN (IP Leakage)",
+      "requires_consent": true,
+      "gdpr_reference": "GDPR Art. 6(1) (Transmits visitor IP to Adobe on page load)"
+    }
+  ],
+  "non_essential_cookie_prefixes": [
+    { "prefix": "_ga", "vendor": "Google Analytics", "category": "Analytics" },
+    { "prefix": "_gid", "vendor": "Google Analytics", "category": "Analytics" },
+    { "prefix": "_gat", "vendor": "Google Analytics", "category": "Analytics" },
+    { "prefix": "_gcl_", "vendor": "Google Ads Conversion Linker", "category": "Advertising" },
+    { "prefix": "_fbp", "vendor": "Meta Pixel", "category": "Advertising" },
+    { "prefix": "_fbc", "vendor": "Meta Pixel Click ID", "category": "Advertising" },
+    { "prefix": "_ttp", "vendor": "TikTok Pixel", "category": "Advertising" },
+    { "prefix": "_uetvid", "vendor": "Microsoft Ads UET", "category": "Advertising" },
+    { "prefix": "_uetsid", "vendor": "Microsoft Ads UET", "category": "Advertising" },
+    { "prefix": "ajs_anonymous_id", "vendor": "Segment", "category": "Analytics" },
+    { "prefix": "ajs_user_id", "vendor": "Segment", "category": "Analytics" },
+    { "prefix": "mp_", "vendor": "Mixpanel", "category": "Analytics" },
+    { "prefix": "amp_", "vendor": "Amplitude", "category": "Analytics" },
+    { "prefix": "ph_", "vendor": "PostHog", "category": "Analytics" },
+    { "prefix": "_hj", "vendor": "Hotjar", "category": "Session Replay" },
+    { "prefix": "_clck", "vendor": "Microsoft Clarity", "category": "Session Replay" },
+    { "prefix": "_clsk", "vendor": "Microsoft Clarity", "category": "Session Replay" },
+    { "prefix": "__hstc", "vendor": "HubSpot", "category": "Marketing" },
+    { "prefix": "hubspotutk", "vendor": "HubSpot", "category": "Marketing" },
+    { "prefix": "intercom-id-", "vendor": "Intercom", "category": "Support / Marketing" }
+  ],
+  "non_essential_storage_keys": [
+    "ajs_anonymous_id",
+    "ajs_user_id",
+    "ajs_user_traits",
+    "amplitude_unsent",
+    "mp_",
+    "ph_",
+    "_hjRecording",
+    "intercom.intercom-state"
+  ]
+}
