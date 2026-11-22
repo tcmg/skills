@@ -207,7 +207,7 @@ That is very strict, so offer it rather than default to it.
 | `Operation not permitted` reading a file under `~` | Not in `allowRead` | Add that tool's folder (e.g. `~/.pyenv`) |
 | Commands lose PATH/aliases | Shell snapshot unreadable | Keep `~/.claude/shell-snapshots` in `allowRead` |
 | A personal skill no longer loads its references | `blockReadsOutsideWorkingDirectories` | Keep skills inside the project (`.claude/skills`) or add `--add-dir ~/.claude/skills` |
-| `git push` fails on credentials | Credential helper reads a denied file | Use the macOS Keychain helper (`git config --global credential.helper osxkeychain`) |
+| `git push` fails with "could not read Username" | The sandbox blocks the Keychain credential helper. That is intended: otherwise any sandboxed command could run `git credential fill` and print your token | Push (and open PRs) from your own terminal. Don't re-allow `~/Library/Keychains` |
 | Package install can't reach the registry | Network allowlist | Approve the domain when prompted, or add it to `allowedDomains` |
 | Can't bind a dev-server port | Local binding off | `sandbox.network.allowLocalBinding: true` |
 | Session refuses to start | `failIfUnavailable` and the sandbox can't start | Fix the sandbox (`claude doctor`). Don't remove the flag |
