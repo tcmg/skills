@@ -3,6 +3,7 @@
 A collection of open [Agent Skills](https://agentskills.io) and UI plugins for **Google Antigravity**, **Claude Code**, **OpenAI Codex**, **Gemini CLI**, and **Cursor**:
 
 - **[`skills/gdpr-auditor`](skills/gdpr-auditor/SKILL.md)**: Universal GDPR & ePrivacy Directive (Art. 5(3)) technical compliance auditor combining static codebase/schema scanning with active 3-state headless browser inspection.
+- **[`skills/agent-security-auditor`](skills/agent-security-auditor/SKILL.md)**: Audits and hardens the local macOS security setup of AI coding agents (**Claude Code**, **Claude Desktop**, **Google Antigravity**, and **Gemini CLI**) with a live sandbox probe and diff-based hardening proposals.
 - **[`plugins/markdown-blog-studio`](plugins/markdown-blog-studio/README.md)**: Minimalist, site-aware 3-view Markdown blog editor (**Visual Edit**, dark **Raw Markdown**, **Read Preview**) built as an Antigravity Sidecar Aux Pane UI plugin (with Chrome pop-out, toggleable live site sidebars, `.blog-studio.json` auto-onboarding, and optional Claude MCP App support).
 
 ---
@@ -100,6 +101,40 @@ node skills/gdpr-auditor/scripts/inspect_frontend_runtime.mjs \
 
 ---
 
+## Also in this repo: `agent-security-auditor`
+
+Audits and hardens the local security setup of your AI coding agents on macOS: **Claude Code** (CLI and the desktop app's Code tab), **Claude Desktop**, **Google Antigravity** (app, IDE and `agy` CLI) and **Gemini CLI**. It checks three goals:
+
+1. Personal files and credentials stay private.
+2. Agents run sandboxed.
+3. Agents can reach your code folder (e.g. `~/Code`) and little else.
+
+What it does:
+- A read-only scanner covers each tool's settings:
+  - sandbox mode, permission modes and allow/deny rules
+  - MCP servers, hooks and automations
+  - remembered permission grants
+  - plaintext tokens and remote control
+  - macOS privacy grants
+- A **live probe** shows which sensitive paths the agent's own sandbox can actually open (zero bytes read).
+- It proposes hardened configs (diffs, nothing applied automatically) and walks you through applying and verifying them.
+
+```bash
+cp -r skills/agent-security-auditor ~/.claude/skills/agent-security-auditor        # Claude Code
+cp -r skills/agent-security-auditor ~/.gemini/config/skills/agent-security-auditor  # Antigravity
+```
+
+```bash
+# Standalone (Python 3.8+ stdlib only)
+python3 skills/agent-security-auditor/scripts/scan_agent_security.py --code-dir ~/Code --probe \
+  --output /tmp/agent_audit.json --markdown /tmp/agent_audit.md --propose-dir /tmp/agent_audit_proposals
+
+# Self-tests (fixture home with deliberately risky configs)
+python3 skills/agent-security-auditor/tests/test_scanner.py
+```
+
+---
+
 ## Repository Structure
 
 ```text
@@ -107,6 +142,13 @@ skills/
 ├── README.md
 ├── LICENSE
 ├── skills/
+│   ├── agent-security-auditor/      # AI agent lock-down auditor (Claude + Antigravity)
+│   │   ├── SKILL.md
+│   │   ├── scripts/scan_agent_security.py
+│   │   ├── references/              # claude_code_hardening.md, antigravity_hardening.md,
+│   │   │                            # macos_os_layer.md, sensitive_paths.json
+│   │   ├── resources/audit_report_template.md
+│   │   └── tests/test_scanner.py
 │   └── gdpr-auditor/                # Universal Agent Skill package
 │       ├── SKILL.md                 # Multi-phase orchestrator instructions
 │       ├── scripts/
