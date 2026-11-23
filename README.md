@@ -1,6 +1,27 @@
-# `gdpr-auditor` — Universal GDPR & ePrivacy Technical Compliance Skill
+# `tcmg/skills` — Agent Skills & Antigravity UI Plugins
 
-An open [Agent Skill](https://agentskills.io) for **Google Antigravity**, **Claude Code**, **OpenAI Codex**, **Gemini CLI**, and **Cursor** that performs an end-to-end **technical and architectural GDPR & ePrivacy Directive (Art. 5(3)) compliance audit** on web applications and backend servers.
+A collection of open [Agent Skills](https://agentskills.io) and UI plugins for **Google Antigravity**, **Claude Code**, **OpenAI Codex**, **Gemini CLI**, and **Cursor**:
+
+- **[`skills/gdpr-auditor`](skills/gdpr-auditor/SKILL.md)**: Universal GDPR & ePrivacy Directive (Art. 5(3)) technical compliance auditor combining static codebase/schema scanning with active 3-state headless browser inspection.
+- **[`plugins/markdown-blog-studio`](plugins/markdown-blog-studio/README.md)**: Minimalist, site-aware 3-view Markdown blog editor (**Visual Edit**, dark **Raw Markdown**, **Read Preview**) built as an Antigravity Sidecar Aux Pane UI plugin (with Chrome pop-out, toggleable live site sidebars, `.blog-studio.json` auto-onboarding, and optional Claude MCP App support).
+
+---
+
+## `plugins/markdown-blog-studio` — Live Markdown Blog Studio (UI Plugin)
+
+Point it at any Markdown-based static site generator (Hugo, Astro, Eleventy, Jekyll, custom Node SSGs) and run `/blog-editor` to auto-generate `.blog-studio.json` so **Visual Edit** and **Read Preview** replicate your real blog's CSS live.
+
+```bash
+git clone https://github.com/tcmg/skills.git ~/Code/skills
+cd ~/Code/skills/plugins/markdown-blog-studio
+npm install && npm run build && npm run install:plugin
+```
+
+See [`plugins/markdown-blog-studio/README.md`](plugins/markdown-blog-studio/README.md) for `.blog-studio.json` configuration and Claude Desktop / Claude Code MCP App setup.
+
+---
+
+## `skills/gdpr-auditor` — Universal GDPR & ePrivacy Technical Compliance Skill
 
 Unlike static legal checklists, `gdpr-auditor` combines **static codebase/schema analysis** with **active 3-state headless browser inspection** to verify what your application actually does in production.
 
@@ -85,17 +106,26 @@ node skills/gdpr-auditor/scripts/inspect_frontend_runtime.mjs \
 skills/
 ├── README.md
 ├── LICENSE
-└── skills/
-    └── gdpr-auditor/                # Universal Agent Skill package
-        ├── SKILL.md                 # Multi-phase orchestrator instructions
-        ├── scripts/
-        │   ├── scan_gdpr_codebase.py
-        │   └── inspect_frontend_runtime.mjs
-        ├── references/
-        │   ├── gdpr_technical_checklist.md
-        │   └── known_tracker_domains.json
-        └── resources/
-            └── audit_report_template.md
+├── skills/
+│   └── gdpr-auditor/                # Universal Agent Skill package
+│       ├── SKILL.md                 # Multi-phase orchestrator instructions
+│       ├── scripts/
+│       │   ├── scan_gdpr_codebase.py
+│       │   └── inspect_frontend_runtime.mjs
+│       ├── references/
+│       │   ├── gdpr_technical_checklist.md
+│       │   └── known_tracker_domains.json
+│       └── resources/
+│           └── audit_report_template.md
+└── plugins/
+    └── markdown-blog-studio/        # Antigravity UI Plugin + MCP App
+        ├── plugin.json
+        ├── skills/blog-editor/SKILL.md
+        ├── core/                    # Store, frontmatter, site-config, live CSS @scope
+        ├── sidecar/                 # Antigravity Aux Pane + 127.0.0.1 Chrome pop-out
+        ├── mcp/                     # Optional Claude Desktop / Code MCP App server
+        ├── ui/                      # Tiptap v3 + HostBridge single-file Vite UI
+        └── scripts/install-plugin.mjs
 ```
 
 ---

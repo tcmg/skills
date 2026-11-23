@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "markdown-blog-studio-mcp": {
+      "command": "node",
+      "args": [
+        "./mcp/server.mjs"
+      ]
+    }
+  }
+}
