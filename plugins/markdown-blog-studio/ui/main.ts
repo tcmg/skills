@@ -33,6 +33,7 @@ import {
   lookupAutoCorrect,
   type SpellLanguage
 } from './spellcheck';
+import { summarizeAgentDiff } from './agent-diff';
 
 function statusTone(status: string): DropdownTone {
   if (status === 'published') return 'positive';
@@ -384,6 +385,16 @@ async function bootstrap(): Promise<void> {
     svgIcon(['M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z'], 14),
     'Ask Agent'
   ) as HTMLButtonElement;
+  const critiqueBtn = el(
+    'button',
+    {
+      type: 'button',
+      className: 'btn btn-secondary btn-sm',
+      title: 'Send this draft to the AI agent for a read-only editorial critique'
+    },
+    svgIcon(['M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z'], 14),
+    'Critique'
+  ) as HTMLButtonElement;
   const expandBtn = el('button', { type: 'button', className: 'btn btn-secondary btn-sm', hidden: true }, 'Expand') as HTMLButtonElement;
 
   const saveDot = el('span', { className: 'badge-dot' });
@@ -704,6 +715,12 @@ async function bootstrap(): Promise<void> {
     'aria-label': 'Spelling suggestions',
     hidden: true
   });
+  const agentStatusCard = el('aside', {
+    className: 'agent-status-card',
+    role: 'status',
+    'aria-live': 'polite',
+    hidden: true
+  });
   const toastEl = el('div', { className: 'studio-toast', role: 'status', hidden: true });
 
   // --- Modals (New Draft, Image Upload Dropzone, Ask Agent) ---
@@ -900,6 +917,7 @@ async function bootstrap(): Promise<void> {
           newDraftBtn,
           addImageBtn,
           askAgentBtn,
+          critiqueBtn,
           expandBtn
         ),
         el('div', { className: 'topbar-right' }, saveBadge, statsChip, themeSwitcher, siteChromeBtn, popoutBtn, pinTopbarBtn)
@@ -937,6 +955,7 @@ async function bootstrap(): Promise<void> {
     studioWorkspaceEl,
     bubbleMenuEl,
     spellPopoverEl,
+    agentStatusCard,
     newDraftModal,
     imageModal,
     agentModal,
@@ -1117,10 +1136,205 @@ async function bootstrap(): Promise<void> {
 
   // --- Real Dictionary Spellcheck (Visual Edit Squiggles + Click-to-Fix Popover) ---
   const spellDecoKey = new PluginKey<DecorationSet>('spellDecorations');
+  const agentDecoKey = new PluginKey<DecorationSet>('agentPendingHighlight');
   const spellMisspelledMap = new Map<string, string[]>();
   const spellIgnoredWords = new Set<string>();
   let spellCheckTimer: number | null = null;
   let spellCheckSeq = 0;
+
+  interface PendingAgentJob {
+    project: string;
+    slug: string;
+    instruction: string;
+    selectedQuote: string;
+    beforeMarkdown: string;
+    selectionFrom: number;
+    selectionTo: number;
+    startedAt: number;
+  }
+
+  let pendingAgentJob: PendingAgentJob | null = null;
+  let agentElapsedTimer: number | null = null;
+
+  function buildAgentPendingDecorations(doc: NonNullable<typeof editor>['state']['doc']): DecorationSet {
+    if (!pendingAgentJob || pendingAgentJob.selectionTo <= pendingAgentJob.selectionFrom) {
+      return DecorationSet.empty;
+    }
+    const maxPos = doc.content.size;
+    const from = Math.max(0, Math.min(pendingAgentJob.selectionFrom, maxPos));
+    const to = Math.max(from, Math.min(pendingAgentJob.selectionTo, maxPos));
+    if (to <= from) return DecorationSet.empty;
+    return DecorationSet.create(doc, [
+      Decoration.inline(from, to, { class: 'agent-pending-highlight' })
+    ]);
+  }
+
+  function refreshAgentPendingHighlight(): void {
+    if (!editor) return;
+    editor.view.dispatch(editor.state.tr.setMeta(agentDecoKey, true));
+  }
+
+  function clearAgentStatusCard(): void {
+    pendingAgentJob = null;
+    if (agentElapsedTimer) {
+      window.clearInterval(agentElapsedTimer);
+      agentElapsedTimer = null;
+    }
+    agentStatusCard.hidden = true;
+    agentStatusCard.classList.remove('is-working', 'is-review');
+    agentStatusCard.replaceChildren();
+    refreshAgentPendingHighlight();
+  }
+
+  function renderAgentWorkingCard(job: PendingAgentJob): void {
+    if (agentElapsedTimer) {
+      window.clearInterval(agentElapsedTimer);
+      agentElapsedTimer = null;
+    }
+
+    const spinnerEl = el('span', { className: 'agent-spinner', 'aria-hidden': 'true' });
+    const elapsedEl = el('span', { className: 'agent-elapsed tabular-nums', textContent: '0s' });
+    const cancelBtn = el(
+      'button',
+      { type: 'button', className: 'agent-card-close', 'aria-label': 'Dismiss agent status', title: 'Dismiss' },
+      svgIcon(['M18 6 6 18', 'm6 6 12 12'], 13)
+    ) as HTMLButtonElement;
+    cancelBtn.addEventListener('click', clearAgentStatusCard);
+
+    const header = el(
+      'div',
+      { className: 'agent-card-header' },
+      el('div', { className: 'agent-card-title-row' }, spinnerEl, el('span', { className: 'agent-card-title', textContent: 'Agent is working…' }), elapsedEl),
+      cancelBtn
+    );
+
+    const promptPreview = el('div', {
+      className: 'agent-card-prompt',
+      textContent: job.instruction.length > 140 ? `${job.instruction.slice(0, 139)}…` : job.instruction
+    });
+
+    const quotePreview = job.selectedQuote
+      ? el('div', {
+          className: 'agent-card-quote',
+          textContent: `“${job.selectedQuote.length > 120 ? `${job.selectedQuote.slice(0, 119)}…` : job.selectedQuote}”`
+        })
+      : null;
+
+    agentStatusCard.classList.remove('is-review');
+    agentStatusCard.classList.add('is-working');
+    agentStatusCard.replaceChildren(header, promptPreview, ...(quotePreview ? [quotePreview] : []));
+    agentStatusCard.hidden = false;
+
+    agentElapsedTimer = window.setInterval(() => {
+      if (!pendingAgentJob) {
+        if (agentElapsedTimer) window.clearInterval(agentElapsedTimer);
+        agentElapsedTimer = null;
+        return;
+      }
+      const secs = Math.max(0, Math.floor((Date.now() - pendingAgentJob.startedAt) / 1000));
+      elapsedEl.textContent = `${secs}s`;
+    }, 1000);
+  }
+
+  function completePendingAgentJobIfMatching(nextMarkdown: string): boolean {
+    if (!pendingAgentJob) return false;
+    if (
+      pendingAgentJob.project !== state.activeProject ||
+      pendingAgentJob.slug !== state.activeSlug
+    ) {
+      return false;
+    }
+
+    const finishedJob = pendingAgentJob;
+    pendingAgentJob = null;
+    if (agentElapsedTimer) {
+      window.clearInterval(agentElapsedTimer);
+      agentElapsedTimer = null;
+    }
+    refreshAgentPendingHighlight();
+
+    const diff = summarizeAgentDiff(finishedJob.beforeMarkdown, nextMarkdown, finishedJob.selectedQuote);
+    const deltaLabel =
+      diff.addedCount > 0 || diff.removedCount > 0
+        ? `+${diff.addedCount} / −${diff.removedCount} lines`
+        : 'Updated';
+
+    const closeBtn = el(
+      'button',
+      { type: 'button', className: 'agent-card-close', 'aria-label': 'Dismiss change summary', title: 'Dismiss' },
+      svgIcon(['M18 6 6 18', 'm6 6 12 12'], 13)
+    ) as HTMLButtonElement;
+    closeBtn.addEventListener('click', clearAgentStatusCard);
+
+    const header = el(
+      'div',
+      { className: 'agent-card-header' },
+      el(
+        'div',
+        { className: 'agent-card-title-row' },
+        el('span', { className: 'agent-done-dot', 'aria-hidden': 'true' }),
+        el('span', { className: 'agent-card-title', textContent: 'Agent updated draft' }),
+        el('span', { className: 'agent-delta-badge tabular-nums', textContent: deltaLabel })
+      ),
+      closeBtn
+    );
+
+    const promptNote = el('div', {
+      className: 'agent-card-prompt',
+      textContent: finishedJob.instruction.length > 140 ? `${finishedJob.instruction.slice(0, 139)}…` : finishedJob.instruction
+    });
+
+    const diffWrap = el('div', { className: 'agent-diff-stack' });
+    if (diff.beforeExcerpt) {
+      diffWrap.append(
+        el(
+          'div',
+          { className: 'agent-diff-block is-before' },
+          el('div', { className: 'agent-diff-label', textContent: 'Previous text' }),
+          el('div', { className: 'agent-diff-body', textContent: diff.beforeExcerpt })
+        )
+      );
+    }
+    if (diff.afterExcerpt) {
+      diffWrap.append(
+        el(
+          'div',
+          { className: 'agent-diff-block is-after' },
+          el('div', { className: 'agent-diff-label', textContent: 'New text' }),
+          el('div', { className: 'agent-diff-body', textContent: diff.afterExcerpt })
+        )
+      );
+    }
+
+    const revertBtn = el('button', { type: 'button', className: 'btn btn-secondary btn-sm' }, 'Revert') as HTMLButtonElement;
+    revertBtn.addEventListener('click', () => {
+      const anchor = captureViewFocusAnchor(state.viewMode);
+      state.rawMarkdown = finishedJob.beforeMarkdown;
+      if (editor) {
+        syncEditorContentFromRaw();
+        scheduleSpellCheck(true);
+      }
+      rawTextarea.value = state.rawMarkdown;
+      if (state.viewMode === 'raw') autoResizeRawTextarea();
+      if (state.viewMode === 'preview') void renderReadPreview();
+      updateStatsAndMetaUI();
+      scheduleAutoSave();
+      window.requestAnimationFrame(() => restoreViewFocusAnchor(state.viewMode, anchor));
+      clearAgentStatusCard();
+      showToast('Reverted agent edit.');
+    });
+
+    const keepBtn = el('button', { type: 'button', className: 'btn btn-primary btn-sm' }, 'Looks good') as HTMLButtonElement;
+    keepBtn.addEventListener('click', clearAgentStatusCard);
+
+    const actions = el('div', { className: 'agent-card-actions' }, revertBtn, keepBtn);
+
+    agentStatusCard.classList.remove('is-working');
+    agentStatusCard.classList.add('is-review');
+    agentStatusCard.replaceChildren(header, promptNote, diffWrap, actions);
+    agentStatusCard.hidden = false;
+    return true;
+  }
 
   function hideSpellPopover(): void {
     spellPopoverEl.hidden = true;
@@ -1725,7 +1939,9 @@ async function bootstrap(): Promise<void> {
         window.requestAnimationFrame(() => {
           restoreViewFocusAnchor(state.viewMode, anchor);
         });
-        showToast('Merged external edit from disk.');
+        if (!completePendingAgentJobIfMatching(res.content)) {
+          showToast('Merged external edit from disk.');
+        }
       } else {
         state.lastSavedMarkdown = state.rawMarkdown;
       }
@@ -2194,6 +2410,28 @@ async function bootstrap(): Promise<void> {
       name: 'spellAutoCorrect',
       addProseMirrorPlugins() {
         return [
+          new Plugin({
+            key: agentDecoKey,
+            state: {
+              init: (_, { doc }) => buildAgentPendingDecorations(doc),
+              apply: (tr, oldSet, _, newState) => {
+                if (tr.getMeta(agentDecoKey)) {
+                  return buildAgentPendingDecorations(newState.doc);
+                }
+                if (tr.docChanged && pendingAgentJob) {
+                  pendingAgentJob.selectionFrom = tr.mapping.map(pendingAgentJob.selectionFrom);
+                  pendingAgentJob.selectionTo = tr.mapping.map(pendingAgentJob.selectionTo);
+                  return buildAgentPendingDecorations(newState.doc);
+                }
+                return oldSet;
+              }
+            },
+            props: {
+              decorations(editorState) {
+                return agentDecoKey.getState(editorState);
+              }
+            }
+          }),
           new Plugin({
             key: spellDecoKey,
             state: {
@@ -3081,12 +3319,18 @@ async function bootstrap(): Promise<void> {
 
   // --- Ask Agent Modal ---
   let capturedSelectionQuote = '';
+  let capturedSelectionFrom = 0;
+  let capturedSelectionTo = 0;
 
   function openAskAgentModal(): void {
     capturedSelectionQuote = '';
+    capturedSelectionFrom = 0;
+    capturedSelectionTo = 0;
     if (state.viewMode === 'visual' && editor && !editor.state.selection.empty) {
+      capturedSelectionFrom = editor.state.selection.from;
+      capturedSelectionTo = editor.state.selection.to;
       capturedSelectionQuote = editor.state.doc
-        .textBetween(editor.state.selection.from, editor.state.selection.to, ' ')
+        .textBetween(capturedSelectionFrom, capturedSelectionTo, ' ')
         .trim();
     } else if (state.viewMode === 'raw') {
       const sel = rawTextarea.value.slice(rawTextarea.selectionStart, rawTextarea.selectionEnd).trim();
@@ -3105,6 +3349,49 @@ async function bootstrap(): Promise<void> {
   }
 
   askAgentBtn.addEventListener('click', openAskAgentModal);
+
+  critiqueBtn.addEventListener('click', async () => {
+    await persistNow();
+    const fileRef = state.fullPath || `${state.activeProject}/${state.activeSlug}.md`;
+    const parsed = parseDocument(state.rawMarkdown);
+    const stats = computeStats(parsed.body);
+    const title = parsed.meta.title || state.activeSlug || 'Untitled Draft';
+    const langHint = state.spellLang !== 'off' ? ` (spelling locale: ${state.spellLang})` : '';
+
+    const message = [
+      `Please give me an honest, constructive editorial critique of my blog draft \`${fileRef}\` ("${title}", ${stats.words} words)${langHint}.`,
+      '',
+      'Please review:',
+      '1. **Hook & clarity** — Does the opening earn attention and set up the thesis clearly?',
+      '2. **Structure, pacing & flow** — Any repetitive paragraphs, weak transitions, or spots to tighten or cut?',
+      '3. **Voice & concrete examples** — Where would a sharper example or more specific detail make the argument land harder?',
+      '4. **Quick wins** — Typos, grammar slips, awkward phrasing, or missing links.',
+      '',
+      'Reply in chat with concise, actionable bullet points — do **not** edit the file yet unless I ask you to apply changes.'
+    ].join('\n');
+
+    try {
+      const res = await bridge.sendToAgent(message);
+      if (res.delivered) {
+        pendingAgentJob = {
+          project: state.activeProject,
+          slug: state.activeSlug,
+          instruction: 'Editorial critique requested — check the agent chat for feedback.',
+          selectedQuote: '',
+          beforeMarkdown: state.rawMarkdown,
+          selectionFrom: 0,
+          selectionTo: 0,
+          startedAt: Date.now()
+        };
+        renderAgentWorkingCard(pendingAgentJob);
+        showToast('Critique sent to agent — check chat for feedback.');
+      } else {
+        showToast('Copied critique prompt to clipboard.');
+      }
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Failed to request critique.');
+    }
+  });
   agentCancelBtn.addEventListener('click', () => {
     agentModal.hidden = true;
   });
@@ -3122,7 +3409,22 @@ async function bootstrap(): Promise<void> {
     try {
       const res = await bridge.sendToAgent(message);
       agentModal.hidden = true;
-      showToast(res.delivered ? 'Sent to agent conversation.' : 'Copied prompt to clipboard.');
+      if (res.delivered) {
+        pendingAgentJob = {
+          project: state.activeProject,
+          slug: state.activeSlug,
+          instruction,
+          selectedQuote: capturedSelectionQuote,
+          beforeMarkdown: state.rawMarkdown,
+          selectionFrom: capturedSelectionFrom,
+          selectionTo: capturedSelectionTo,
+          startedAt: Date.now()
+        };
+        refreshAgentPendingHighlight();
+        renderAgentWorkingCard(pendingAgentJob);
+      } else {
+        showToast('Copied prompt to clipboard.');
+      }
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Failed to message agent.');
     }
@@ -3256,7 +3558,9 @@ async function bootstrap(): Promise<void> {
         if (res && res.mtimeMs > state.lastMtimeMs + 10) {
           const fresh = await bridge.readPost(state.activeProject, state.activeSlug);
           await applyLoadedPost(fresh);
-          showToast('Synced external edit from disk.');
+          if (!completePendingAgentJobIfMatching(fresh.content)) {
+            showToast('Synced external edit from disk.');
+          }
         }
       } catch {
         // Ignore transient poll errors.
