@@ -5,10 +5,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseDocument, serializeDocument, todayIsoDate } from './frontmatter.mjs';
+import { threeWayMerge } from './merge.mjs';
 import {
   COMMON_STATIC_DIRS,
   autoDetectContentDir,
   findSiteConfigFromBlogRoot,
+  loadSiteConfig,
   resolveSafeRelativePath,
   workspaceUriToPath
 } from './site-config.mjs';
@@ -120,14 +122,64 @@ function extractProjectFromWorkspaceUri(workspaceUri) {
   }
 }
 
+const USER_CONFIG_DIR = path.join(os.homedir(), '.markdown-blog-studio');
+const USER_CONFIG_PATH = path.join(USER_CONFIG_DIR, 'config.json');
+
+export function isFallbackBlogRoot(blogRoot) {
+  if (!blogRoot) return true;
+  const resolved = path.resolve(blogRoot);
+  return (
+    resolved === path.resolve(REPO_ROOT, 'blog-data') ||
+    resolved === path.resolve(USER_CONFIG_DIR, 'blog')
+  );
+}
+
+async function readUserDefaultBlogRoot() {
+  try {
+    const raw = await fs.readFile(USER_CONFIG_PATH, 'utf8');
+    const parsed = JSON.parse(raw);
+    const candidate = typeof parsed?.defaultBlogRoot === 'string' ? parsed.defaultBlogRoot.trim() : '';
+    if (!candidate) return null;
+    const resolved = path.resolve(candidate);
+    const stat = await fs.stat(resolved);
+    if (!stat.isDirectory()) return null;
+    await fs.access(resolved, fsConstants.R_OK | fsConstants.W_OK);
+    return resolved;
+  } catch {
+    return null;
+  }
+}
+
+export async function rememberUserDefaultBlogRoot(blogRoot) {
+  if (!blogRoot || isFallbackBlogRoot(blogRoot)) return;
+  try {
+    const resolved = path.resolve(blogRoot);
+    await fs.mkdir(USER_CONFIG_DIR, { recursive: true });
+    let existing = {};
+    try {
+      const raw = await fs.readFile(USER_CONFIG_PATH, 'utf8');
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') existing = parsed;
+    } catch {
+      // No existing config yet.
+    }
+    if (existing.defaultBlogRoot === resolved) return;
+    const next = { ...existing, defaultBlogRoot: resolved };
+    await fs.writeFile(USER_CONFIG_PATH, `${JSON.stringify(next, null, 2)}\n`, 'utf8');
+  } catch {
+    // Non-fatal if home config cannot be written.
+  }
+}
+
 /**
  * Resolve the active blog content directory.
  * Priority:
  *   1. Explicit options.blogRoot
  *   2. process.env.BLOG_ROOT
- *   3. Active workspace `.blog-studio.json` contentDir or auto-detected SSG content dir
- *      (blog/, content/posts/, content/blog/, src/content/blog/, _posts/, posts/)
- *   4. Fallback (~/.markdown-blog-studio/blog or repo blog-data/)
+ *   3. Any open workspace URI with `.blog-studio.json` (checked first) or an auto-detected
+ *      SSG content dir (blog/, content/posts/, content/blog/, src/content/blog/, _posts/, posts/)
+ *   4. Remembered user default blog root in ~/.markdown-blog-studio/config.json
+ *   5. Fallback (repo blog-data/ or ~/.markdown-blog-studio/blog)
  */
 export async function resolveBlogRoot(options = {}) {
   if (options?.blogRoot) {
@@ -142,11 +194,46 @@ export async function resolveBlogRoot(options = {}) {
     return resolved;
   }
 
-  const wsPath = workspaceUriToPath(options?.workspaceUri);
-  if (wsPath) {
+  const candidateUris = [];
+  if (Array.isArray(options?.workspaceUris)) {
+    for (const uri of options.workspaceUris) {
+      if (typeof uri === 'string' && uri.trim() && !candidateUris.includes(uri)) {
+        candidateUris.push(uri);
+      }
+    }
+  }
+  if (typeof options?.workspaceUri === 'string' && options.workspaceUri.trim() && !candidateUris.includes(options.workspaceUri)) {
+    candidateUris.push(options.workspaceUri);
+  }
+
+  const workspacePaths = candidateUris.map((uri) => workspaceUriToPath(uri)).filter(Boolean);
+
+  // Pass 1: prefer any open workspace that explicitly has `.blog-studio.json`.
+  for (const wsPath of workspacePaths) {
+    const cfg = await loadSiteConfig(wsPath);
+    if (!cfg) continue;
+    const detected = await autoDetectContentDir(wsPath);
+    if (detected) {
+      if (options?.rememberDefault !== false) {
+        await rememberUserDefaultBlogRoot(detected);
+      }
+      return detected;
+    }
+  }
+
+  // Pass 2: check any open workspace for common SSG content directories.
+  for (const wsPath of workspacePaths) {
     const detected = await autoDetectContentDir(wsPath);
     if (detected) {
       return detected;
+    }
+  }
+
+  // Pass 3: fall back to the user's configured / remembered central blog hub.
+  if (options?.useUserDefault !== false) {
+    const remembered = await readUserDefaultBlogRoot();
+    if (remembered) {
+      return remembered;
     }
   }
 
@@ -155,7 +242,7 @@ export async function resolveBlogRoot(options = {}) {
     return repoFallback;
   }
 
-  const homeFallback = path.join(os.homedir(), '.markdown-blog-studio', 'blog');
+  const homeFallback = path.join(USER_CONFIG_DIR, 'blog');
   await fs.mkdir(homeFallback, { recursive: true });
   return homeFallback;
 }
@@ -333,7 +420,7 @@ export async function readPost(blogRoot, project, slug) {
   };
 }
 
-export async function savePost(blogRoot, project, slug, content) {
+export async function savePost(blogRoot, project, slug, content, options = {}) {
   if (typeof content !== 'string') {
     throw new Error('Post content must be a UTF-8 string.');
   }
@@ -355,15 +442,41 @@ export async function savePost(blogRoot, project, slug, content) {
   const fullPath = resolvePostPath(blogRoot, safeProject, filename);
   await verifyNoSymlinkEscape(blogRoot, fullPath);
 
+  let contentToWrite = content;
+  let merged = false;
+  if (
+    typeof options?.baseContent === 'string' &&
+    typeof options?.expectedMtimeMs === 'number' &&
+    options.expectedMtimeMs > 0
+  ) {
+    try {
+      const existingStat = await fs.stat(fullPath);
+      if (existingStat.mtimeMs > options.expectedMtimeMs + 10 && existingStat.size <= MAX_POST_BYTES) {
+        const remoteContent = await fs.readFile(fullPath, 'utf8');
+        const mergeResult = threeWayMerge(options.baseContent, content, remoteContent);
+        if (mergeResult.merged) {
+          contentToWrite = mergeResult.content;
+          merged = true;
+        }
+      }
+    } catch (err) {
+      if (!err || err.code !== 'ENOENT') {
+        throw err;
+      }
+    }
+  }
+
   const tempFilename = `tmp-${safeSlug}-${crypto.randomBytes(6).toString('hex')}.tmp`;
   const tempPath = resolvePostPath(blogRoot, safeProject, tempFilename);
 
-  await fs.writeFile(tempPath, content, { encoding: 'utf8', mode: 0o644 });
+  await fs.writeFile(tempPath, contentToWrite, { encoding: 'utf8', mode: 0o644 });
   await fs.rename(tempPath, fullPath);
   const stat = await fs.stat(fullPath);
 
   return {
     saved: true,
+    merged,
+    ...(merged ? { content: contentToWrite } : {}),
     project: safeProject,
     slug: safeSlug,
     filename,
@@ -643,7 +756,11 @@ export async function readAsset(blogRoot, project, assetFilename) {
 export async function initStore(options = {}) {
   const blogRoot = await resolveBlogRoot(options);
   const workspaceProject = extractProjectFromWorkspaceUri(options.workspaceUri);
-  const inBlogHubWorkspace = isWorkspaceBlogHub(blogRoot, options.workspaceUri);
+  const allWorkspaceUris = [
+    ...(Array.isArray(options.workspaceUris) ? options.workspaceUris : []),
+    ...(options.workspaceUri ? [options.workspaceUri] : [])
+  ];
+  const inBlogHubWorkspace = allWorkspaceUris.some((uri) => isWorkspaceBlogHub(blogRoot, uri));
   let preferredProject = null;
   if (options.preferredProject) {
     preferredProject = validateProject(options.preferredProject, { allowAll: true });

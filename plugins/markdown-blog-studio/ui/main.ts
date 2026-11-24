@@ -1,4 +1,6 @@
 import { Editor, Extension, mergeAttributes } from '@tiptap/core';
+import { Plugin, PluginKey } from '@tiptap/pm/state';
+import { Decoration, DecorationSet } from '@tiptap/pm/view';
 import Image from '@tiptap/extension-image';
 import Placeholder from '@tiptap/extension-placeholder';
 import Typography from '@tiptap/extension-typography';
@@ -22,6 +24,15 @@ import {
   hasOpenCustomSelectIn,
   type DropdownTone
 } from './dropdown';
+import {
+  DEFAULT_SPELL_LANGUAGE,
+  SPELL_LANGUAGE_OPTIONS,
+  extractWordBeforeCaret,
+  isRawMarkdownProtectedPos,
+  isWordBoundaryChar,
+  lookupAutoCorrect,
+  type SpellLanguage
+} from './spellcheck';
 
 function statusTone(status: string): DropdownTone {
   if (status === 'published') return 'positive';
@@ -33,11 +44,19 @@ function statusTone(status: string): DropdownTone {
 
 type ViewMode = 'visual' | 'raw' | 'preview';
 type ThemeMode = 'blog' | 'light' | 'dark' | 'auto';
+type RawWidthMode = 'standard' | 'wide' | 'full';
 
 const ROOT_PROJECT = '_root';
 const ALL_PROJECTS = '_all';
 const THEME_STORAGE_KEY = 'markdown-blog-studio-theme-v2';
 const SITE_CHROME_STORAGE_KEY = 'markdown-blog-studio-site-chrome';
+const RAW_FONT_SIZE_STORAGE_KEY = 'markdown-blog-studio-raw-font-size';
+const RAW_WIDTH_STORAGE_KEY = 'markdown-blog-studio-raw-width';
+const PIN_STATS_STORAGE_KEY = 'markdown-blog-studio-pin-stats';
+const SPELL_LANG_STORAGE_KEY = 'markdown-blog-studio-spell-lang';
+const DEFAULT_RAW_FONT_SIZE = 14;
+const MIN_RAW_FONT_SIZE = 12;
+const MAX_RAW_FONT_SIZE = 26;
 const ALLOWED_LINK_PROTOCOLS = new Set(['http:', 'https:', 'mailto:']);
 
 function splitLeadingH1(body: string): { hasLeadingH1: boolean; headingText: string; restBody: string } {
@@ -112,6 +131,111 @@ function saveStoredTheme(mode: ThemeMode): void {
   }
 }
 
+function readStoredRawFontSize(): number {
+  try {
+    const raw = window.localStorage.getItem(RAW_FONT_SIZE_STORAGE_KEY);
+    if (raw) {
+      const parsed = Number(raw);
+      if (Number.isFinite(parsed)) {
+        return Math.min(MAX_RAW_FONT_SIZE, Math.max(MIN_RAW_FONT_SIZE, Math.round(parsed)));
+      }
+    }
+  } catch {
+    // Ignore storage errors inside sandboxed iframes.
+  }
+  return DEFAULT_RAW_FONT_SIZE;
+}
+
+function saveStoredRawFontSize(size: number): void {
+  try {
+    window.localStorage.setItem(RAW_FONT_SIZE_STORAGE_KEY, String(size));
+  } catch {
+    // Ignore storage errors inside sandboxed iframes.
+  }
+}
+
+function readStoredRawWidth(): RawWidthMode {
+  try {
+    const val = window.localStorage.getItem(RAW_WIDTH_STORAGE_KEY);
+    if (val === 'standard' || val === 'wide' || val === 'full') return val;
+  } catch {
+    // Ignore storage errors inside sandboxed iframes.
+  }
+  return 'standard';
+}
+
+function saveStoredRawWidth(mode: RawWidthMode): void {
+  try {
+    window.localStorage.setItem(RAW_WIDTH_STORAGE_KEY, mode);
+  } catch {
+    // Ignore storage errors inside sandboxed iframes.
+  }
+}
+
+function readStoredPinStats(): boolean {
+  try {
+    return window.localStorage.getItem(PIN_STATS_STORAGE_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function saveStoredPinStats(pinned: boolean): void {
+  try {
+    window.localStorage.setItem(PIN_STATS_STORAGE_KEY, pinned ? '1' : '0');
+  } catch {
+    // Ignore storage errors inside sandboxed iframes.
+  }
+}
+
+function readStoredSpellLanguage(): SpellLanguage {
+  try {
+    const val = window.localStorage.getItem(SPELL_LANG_STORAGE_KEY);
+    if (val === 'en-AU' || val === 'en-GB' || val === 'en-US' || val === 'off') {
+      return val;
+    }
+  } catch {
+    // Ignore storage errors inside sandboxed iframes.
+  }
+  return DEFAULT_SPELL_LANGUAGE;
+}
+
+function saveStoredSpellLanguage(lang: SpellLanguage): void {
+  try {
+    window.localStorage.setItem(SPELL_LANG_STORAGE_KEY, lang);
+  } catch {
+    // Ignore storage errors inside sandboxed iframes.
+  }
+}
+
+function formatSmartPath(fullPath: string, maxChars = 36): string {
+  const clean = String(fullPath || '').trim();
+  if (clean.length <= maxChars) return clean;
+
+  const sep = clean.includes('\\') && !clean.includes('/') ? '\\' : '/';
+  const ellipsis = '…';
+  const budget = maxChars - ellipsis.length;
+
+  // Favor the end of the path (filename / slug + parent folder) while keeping a recognizable start.
+  const lastSepIdx = clean.lastIndexOf(sep);
+  const filenamePart = lastSepIdx >= 0 ? clean.slice(lastSepIdx) : clean;
+  const minHead = Math.min(12, Math.floor(budget * 0.35));
+
+  let tailBudget = Math.max(Math.floor(budget * 0.62), Math.min(filenamePart.length, budget - minHead));
+  tailBudget = Math.min(tailBudget, budget - 6);
+
+  let tail = clean.slice(clean.length - tailBudget);
+  // Snap tail to a path separator near the cut if it keeps the tail readable.
+  const nextSepInTail = tail.indexOf(sep);
+  if (nextSepInTail > 0 && nextSepInTail <= 6 && tail.length - nextSepInTail >= Math.min(filenamePart.length, 14)) {
+    tail = tail.slice(nextSepInTail);
+  }
+
+  const headBudget = Math.max(6, budget - tail.length);
+  const head = clean.slice(0, headBudget).replace(/[\/\\]+$/, '');
+  return `${head}${ellipsis}${tail}`;
+}
+
 function isSafeLinkHref(href: string): boolean {
   const trimmed = href.trim();
   if (!trimmed) return false;
@@ -173,6 +297,10 @@ async function bootstrap(): Promise<void> {
     themeMode: (storedTheme || 'light') as ThemeMode,
     hasUserThemePref: storedTheme !== null,
     showSiteChrome: readStoredSiteChrome(),
+    rawFontSize: readStoredRawFontSize(),
+    rawWidth: readStoredRawWidth(),
+    pinStats: readStoredPinStats(),
+    spellLang: readStoredSpellLanguage(),
     siteTheme: { available: false, siteName: '', css: '' } as SiteThemePayload,
     hostTheme: null as 'light' | 'dark' | null,
     blogRoot: '',
@@ -186,6 +314,7 @@ async function bootstrap(): Promise<void> {
     lastHandledFocusAt: Date.now(),
     bodyHadLeadingH1: false,
     rawMarkdown: '',
+    lastSavedMarkdown: '',
     dirty: false,
     saving: false,
     isSyncingEditor: false,
@@ -211,9 +340,14 @@ async function bootstrap(): Promise<void> {
       if (open) cancelTopbarClose();
     },
     onChange: async (value) => {
-      if (state.dirty) await persistNow();
-      const payload = await bridge.init({ preferredProject: value });
-      await applyInitPayload(payload);
+      try {
+        if (state.dirty) await persistNow();
+        const payload = await bridge.init({ preferredProject: value });
+        await applyInitPayload(payload);
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : 'Failed to switch project.');
+        renderSelectors();
+      }
     }
   });
 
@@ -228,12 +362,17 @@ async function bootstrap(): Promise<void> {
       if (open) cancelTopbarClose();
     },
     onChange: async (val) => {
-      if (state.dirty) await persistNow();
-      const sepIdx = val.indexOf('::');
-      const targetProject = sepIdx >= 0 ? val.slice(0, sepIdx) : state.activeProject;
-      const targetSlug = sepIdx >= 0 ? val.slice(sepIdx + 2) : val;
-      const post = await bridge.readPost(targetProject, targetSlug);
-      await applyLoadedPost(post);
+      try {
+        if (state.dirty) await persistNow();
+        const sepIdx = val.indexOf('::');
+        const targetProject = sepIdx >= 0 ? val.slice(0, sepIdx) : state.activeProject;
+        const targetSlug = sepIdx >= 0 ? val.slice(sepIdx + 2) : val;
+        const post = await bridge.readPost(targetProject, targetSlug);
+        await applyLoadedPost(post);
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : 'Failed to open article.');
+        renderSelectors();
+      }
     }
   });
 
@@ -250,7 +389,42 @@ async function bootstrap(): Promise<void> {
   const saveDot = el('span', { className: 'badge-dot' });
   const saveLabel = el('span', { textContent: 'Saved' });
   const saveBadge = el('span', { className: 'badge badge-positive', role: 'status' }, saveDot, saveLabel);
-  const statsChip = el('span', { className: 'stats-chip tabular-nums', textContent: '0 words · 0 min read' });
+  const statsChipText = el('span', { className: 'stats-chip-text', textContent: '0 words · 0 min read' });
+  const pinStatsBtn = el(
+    'button',
+    {
+      type: 'button',
+      className: 'stats-pin-btn',
+      'aria-pressed': String(state.pinStats),
+      'aria-label': 'Pin word count and read time to top-right corner',
+      title: 'Pin word count & read time to top-right corner'
+    },
+    svgIcon(['M12 17v5', 'M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z'], 12)
+  ) as HTMLButtonElement;
+  const statsChip = el('div', { className: 'stats-chip tabular-nums' }, statsChipText, pinStatsBtn);
+
+  const floatingStatsText = el('span', { className: 'floating-stats-text tabular-nums', textContent: '0 words · 0 min read' });
+  const floatingStatsUnpinBtn = el(
+    'button',
+    {
+      type: 'button',
+      className: 'floating-stats-unpin',
+      'aria-label': 'Unpin word count and read time',
+      title: 'Unpin word count & read time'
+    },
+    svgIcon(['M18 6 6 18', 'm6 6 12 12'], 12)
+  ) as HTMLButtonElement;
+  const floatingStatsBox = el(
+    'div',
+    {
+      className: 'floating-stats-box',
+      role: 'status',
+      'aria-live': 'polite',
+      hidden: !state.pinStats
+    },
+    floatingStatsText,
+    floatingStatsUnpinBtn
+  );
 
   const themeButtons: HTMLButtonElement[] = (['blog', 'light', 'dark', 'auto'] as ThemeMode[]).map((mode) =>
     el(
@@ -334,6 +508,30 @@ async function bootstrap(): Promise<void> {
     'aria-label': 'Article date'
   }) as HTMLInputElement;
 
+  const spellLangSelect = createCustomSelect({
+    ariaLabel: 'Spelling language',
+    variant: 'compact',
+    menuMinWidth: 205,
+    onOpenChange: (open) => {
+      if (open) cancelTopbarClose();
+    },
+    onChange: (val) => {
+      if (val === 'en-AU' || val === 'en-GB' || val === 'en-US' || val === 'off') {
+        applySpellLanguage(val);
+      }
+    }
+  });
+  spellLangSelect.setOptions(
+    SPELL_LANGUAGE_OPTIONS.map((opt) => ({
+      value: opt.value,
+      label: opt.label,
+      triggerLabel: opt.triggerLabel,
+      subtitle: opt.subtitle,
+      dotTone: opt.value === 'off' ? 'muted' : 'info'
+    })),
+    state.spellLang
+  );
+
   const pathCodeEl = el('code', { className: 'kv-value', textContent: 'Loading…' });
   const copyPathBtn = el(
     'button',
@@ -405,13 +603,87 @@ async function bootstrap(): Promise<void> {
     placeholder: '---\ndate: 2026-11-18\ntitle: Draft\nstatus: idea\n---\n\n# Start writing…',
     'aria-label': 'Raw Markdown source'
   }) as HTMLTextAreaElement;
+  rawTextarea.style.fontSize = `${state.rawFontSize}px`;
+
+  const rawFontDecBtn = el(
+    'button',
+    {
+      type: 'button',
+      className: 'raw-font-btn',
+      'aria-label': 'Decrease Markdown font size',
+      title: 'Decrease Markdown font size'
+    },
+    'A−'
+  ) as HTMLButtonElement;
+  const rawFontResetBtn = el(
+    'button',
+    {
+      type: 'button',
+      className: 'raw-font-readout tabular-nums',
+      'aria-label': 'Reset Markdown font size to default',
+      title: 'Click to reset to default (14px)'
+    },
+    `${state.rawFontSize}px`
+  ) as HTMLButtonElement;
+  const rawFontIncBtn = el(
+    'button',
+    {
+      type: 'button',
+      className: 'raw-font-btn',
+      'aria-label': 'Increase Markdown font size',
+      title: 'Increase Markdown font size'
+    },
+    'A+'
+  ) as HTMLButtonElement;
+
+  const rawWidthConfigs: Array<{ mode: RawWidthMode; label: string; title: string }> = [
+    { mode: 'standard', label: 'Standard', title: 'Standard reading column width' },
+    { mode: 'wide', label: '75%', title: '75% window width' },
+    { mode: 'full', label: 'Full', title: 'Full window width' }
+  ];
+  const rawWidthButtons = new Map<RawWidthMode, HTMLButtonElement>();
+  const rawWidthControls = el(
+    'div',
+    { className: 'raw-width-controls', role: 'radiogroup', 'aria-label': 'Markdown editor width' },
+    ...rawWidthConfigs.map(({ mode, label, title }) => {
+      const btn = el(
+        'button',
+        {
+          type: 'button',
+          className: 'raw-width-btn',
+          role: 'radio',
+          'aria-checked': String(state.rawWidth === mode),
+          title
+        },
+        label
+      ) as HTMLButtonElement;
+      rawWidthButtons.set(mode, btn);
+      return btn;
+    })
+  );
+
+  const rawFontControls = el(
+    'div',
+    { className: 'raw-font-controls', role: 'group', 'aria-label': 'Markdown font size' },
+    rawFontDecBtn,
+    rawFontResetBtn,
+    rawFontIncBtn
+  );
+
+  const rawToolbarRight = el('div', { className: 'raw-bar-controls' }, rawWidthControls, rawFontControls);
+
   const rawPane = el(
     'div',
     { className: 'raw-markdown-wrap', hidden: true },
-    el('div', {
-      className: 'raw-markdown-hint',
-      textContent: 'Monospace source mode — includes YAML frontmatter. Shortcuts: ⌘B bold, ⌘I italic, ⌘E code, ⌘K link, Tab indent.'
-    }),
+    el(
+      'div',
+      { className: 'raw-markdown-bar' },
+      el('div', {
+        className: 'raw-markdown-hint',
+        textContent: 'Monospace source mode — includes YAML frontmatter. Shortcuts: ⌘B bold, ⌘I italic, ⌘E code, ⌘K link, Tab indent.'
+      }),
+      rawToolbarRight
+    ),
     rawTextarea
   );
 
@@ -426,6 +698,12 @@ async function bootstrap(): Promise<void> {
 
   const sheetInnerEl = el('div', { className: 'sheet-inner' }, titleWrap, visualPane, previewPane);
   const editorSheetEl = el('div', { className: 'editor-sheet' }, sheetInnerEl, rawPane);
+  const spellPopoverEl = el('div', {
+    className: 'spell-popover',
+    role: 'menu',
+    'aria-label': 'Spelling suggestions',
+    hidden: true
+  });
   const toastEl = el('div', { className: 'studio-toast', role: 'status', hidden: true });
 
   // --- Modals (New Draft, Image Upload Dropzone, Ask Agent) ---
@@ -637,7 +915,8 @@ async function bootstrap(): Promise<void> {
             'div',
             { className: 'meta-controls' },
             el('div', { className: 'meta-field' }, el('span', { className: 'meta-field-label', textContent: 'Status' }), statusSelect.el),
-            el('label', { className: 'meta-field' }, el('span', { className: 'meta-field-label', textContent: 'Date' }), dateInput)
+            el('label', { className: 'meta-field' }, el('span', { className: 'meta-field-label', textContent: 'Date' }), dateInput),
+            el('div', { className: 'meta-field' }, el('span', { className: 'meta-field-label', textContent: 'Spell' }), spellLangSelect.el)
           ),
           el('div', { className: 'path-copy-group' }, pathCodeEl, copyPathBtn)
         )
@@ -654,8 +933,10 @@ async function bootstrap(): Promise<void> {
     'div',
     { className: 'studio-shell' },
     topbarDock,
+    floatingStatsBox,
     studioWorkspaceEl,
     bubbleMenuEl,
+    spellPopoverEl,
     newDraftModal,
     imageModal,
     agentModal,
@@ -742,6 +1023,292 @@ async function bootstrap(): Promise<void> {
   pinTopbarBtn.addEventListener('click', () => {
     setTopbarPinned(!topbarPinned);
   });
+
+  function applyPinStats(pinned: boolean): void {
+    state.pinStats = pinned;
+    saveStoredPinStats(pinned);
+    pinStatsBtn.setAttribute('aria-pressed', String(pinned));
+    pinStatsBtn.classList.toggle('is-pinned', pinned);
+    pinStatsBtn.title = pinned ? 'Unpin word count & read time' : 'Pin word count & read time to top-right corner';
+    floatingStatsBox.hidden = !pinned;
+  }
+
+  applyPinStats(state.pinStats);
+
+  pinStatsBtn.addEventListener('click', () => {
+    applyPinStats(!state.pinStats);
+  });
+
+  floatingStatsUnpinBtn.addEventListener('click', () => {
+    applyPinStats(false);
+  });
+
+  function applyRawFontSize(nextSize: number): void {
+    const clamped = Math.min(MAX_RAW_FONT_SIZE, Math.max(MIN_RAW_FONT_SIZE, Math.round(nextSize)));
+    state.rawFontSize = clamped;
+    saveStoredRawFontSize(clamped);
+    rawTextarea.style.fontSize = `${clamped}px`;
+    rawFontResetBtn.textContent = `${clamped}px`;
+    rawFontDecBtn.disabled = clamped <= MIN_RAW_FONT_SIZE;
+    rawFontIncBtn.disabled = clamped >= MAX_RAW_FONT_SIZE;
+    if (state.viewMode === 'raw') {
+      autoResizeRawTextarea();
+    }
+  }
+
+  applyRawFontSize(state.rawFontSize);
+
+  rawFontDecBtn.addEventListener('click', () => {
+    applyRawFontSize(state.rawFontSize - 1);
+  });
+
+  rawFontIncBtn.addEventListener('click', () => {
+    applyRawFontSize(state.rawFontSize + 1);
+  });
+
+  rawFontResetBtn.addEventListener('click', () => {
+    applyRawFontSize(DEFAULT_RAW_FONT_SIZE);
+  });
+
+  function applyRawWidth(mode: RawWidthMode): void {
+    state.rawWidth = mode;
+    saveStoredRawWidth(mode);
+    shell.setAttribute('data-raw-width', mode);
+    for (const [m, btn] of rawWidthButtons.entries()) {
+      btn.setAttribute('aria-checked', String(m === mode));
+    }
+    if (state.viewMode === 'raw') {
+      autoResizeRawTextarea();
+    }
+  }
+
+  applyRawWidth(state.rawWidth);
+
+  for (const [mode, btn] of rawWidthButtons.entries()) {
+    btn.addEventListener('click', () => {
+      applyRawWidth(mode);
+    });
+  }
+
+  function applySpellAttributesToDom(): void {
+    const enabled = state.spellLang !== 'off';
+    const targets: Array<HTMLElement | null | undefined> = [titleInput, rawTextarea, editor?.view?.dom];
+    for (const target of targets) {
+      if (!target) continue;
+      target.setAttribute('spellcheck', enabled ? 'true' : 'false');
+      if (enabled) {
+        target.setAttribute('lang', state.spellLang);
+      } else {
+        target.removeAttribute('lang');
+      }
+    }
+  }
+
+  function applySpellLanguage(lang: SpellLanguage): void {
+    state.spellLang = lang;
+    saveStoredSpellLanguage(lang);
+    spellLangSelect.setValue(lang);
+    applySpellAttributesToDom();
+    hideSpellPopover();
+    spellMisspelledMap.clear();
+    refreshSpellDecorations();
+    scheduleSpellCheck(true);
+  }
+
+  // --- Real Dictionary Spellcheck (Visual Edit Squiggles + Click-to-Fix Popover) ---
+  const spellDecoKey = new PluginKey<DecorationSet>('spellDecorations');
+  const spellMisspelledMap = new Map<string, string[]>();
+  const spellIgnoredWords = new Set<string>();
+  let spellCheckTimer: number | null = null;
+  let spellCheckSeq = 0;
+
+  function hideSpellPopover(): void {
+    spellPopoverEl.hidden = true;
+    spellPopoverEl.replaceChildren();
+  }
+
+  function extractDocWordRanges(doc: NonNullable<typeof editor>['state']['doc']): Array<{ word: string; from: number; to: number }> {
+    const out: Array<{ word: string; from: number; to: number }> = [];
+    const wordRegex = /\b[A-Za-z][A-Za-z'’-]*[A-Za-z]\b/g;
+
+    doc.descendants((node, pos) => {
+      if (node.type.name === 'codeBlock') return false;
+      if (!node.isText || !node.text) return true;
+      if (node.marks.some((m) => m.type.name === 'code' || m.type.name === 'link')) {
+        return true;
+      }
+
+      const text = node.text;
+      wordRegex.lastIndex = 0;
+      let match: RegExpExecArray | null;
+      while ((match = wordRegex.exec(text)) !== null) {
+        const word = match[0];
+        const idx = match.index;
+        if (idx > 0 && /[\/\\_@#:$`.0-9]/.test(text[idx - 1])) continue;
+        out.push({ word, from: pos + idx, to: pos + idx + word.length });
+      }
+      return true;
+    });
+    return out;
+  }
+
+  function buildSpellDecorations(doc: NonNullable<typeof editor>['state']['doc']): DecorationSet {
+    if (state.spellLang === 'off' || spellMisspelledMap.size === 0) {
+      return DecorationSet.empty;
+    }
+    const ranges = extractDocWordRanges(doc);
+    const decos: Decoration[] = [];
+    for (const r of ranges) {
+      if (spellIgnoredWords.has(r.word.toLowerCase())) continue;
+      if (!spellMisspelledMap.has(r.word)) continue;
+      decos.push(
+        Decoration.inline(r.from, r.to, {
+          class: 'spell-error',
+          'data-spell-word': r.word,
+          'data-spell-from': String(r.from),
+          'data-spell-to': String(r.to)
+        })
+      );
+    }
+    return DecorationSet.create(doc, decos);
+  }
+
+  function refreshSpellDecorations(): void {
+    if (!editor) return;
+    editor.view.dispatch(editor.state.tr.setMeta(spellDecoKey, true));
+  }
+
+  function scheduleSpellCheck(immediate = false): void {
+    if (spellCheckTimer) {
+      window.clearTimeout(spellCheckTimer);
+      spellCheckTimer = null;
+    }
+    if (state.spellLang === 'off') {
+      spellMisspelledMap.clear();
+      refreshSpellDecorations();
+      return;
+    }
+    const run = async () => {
+      if (!editor || !bridge?.spellcheck || state.spellLang === 'off') return;
+      const reqSeq = ++spellCheckSeq;
+      const lang = state.spellLang;
+      const ranges = extractDocWordRanges(editor.state.doc);
+      const uniqueWords = Array.from(
+        new Set(ranges.map((r) => r.word).filter((w) => !spellIgnoredWords.has(w.toLowerCase())))
+      );
+      if (uniqueWords.length === 0) {
+        spellMisspelledMap.clear();
+        refreshSpellDecorations();
+        return;
+      }
+      try {
+        const res = await bridge.spellcheck(lang, uniqueWords);
+        if (reqSeq !== spellCheckSeq || state.spellLang !== lang) return;
+        spellMisspelledMap.clear();
+        for (const [w, suggestions] of Object.entries(res?.misspelled || {})) {
+          if (!spellIgnoredWords.has(w.toLowerCase())) {
+            spellMisspelledMap.set(w, suggestions);
+          }
+        }
+        refreshSpellDecorations();
+      } catch {
+        // Non-fatal if backend spellcheck endpoint is unavailable (e.g. old sidecar before reload).
+      }
+    };
+
+    if (immediate) {
+      void run();
+    } else {
+      spellCheckTimer = window.setTimeout(() => {
+        void run();
+      }, 360);
+    }
+  }
+
+  function openSpellPopoverForSpan(spanEl: HTMLElement): void {
+    if (!editor) return;
+    const word = spanEl.getAttribute('data-spell-word') || '';
+    const from = Number(spanEl.getAttribute('data-spell-from'));
+    const to = Number(spanEl.getAttribute('data-spell-to'));
+    if (!word || !Number.isFinite(from) || !Number.isFinite(to)) return;
+
+    const suggestions = spellMisspelledMap.get(word) || [];
+    const items: HTMLElement[] = [];
+
+    if (suggestions.length > 0) {
+      for (const suggestion of suggestions) {
+        const btn = el('button', { type: 'button', className: 'spell-popover-item is-suggestion', role: 'menuitem' }, suggestion) as HTMLButtonElement;
+        btn.addEventListener('mousedown', (e) => e.preventDefault());
+        btn.addEventListener('click', () => {
+          editor?.chain().focus().insertContentAt({ from, to }, suggestion).run();
+          hideSpellPopover();
+          scheduleSpellCheck(true);
+        });
+        items.push(btn);
+      }
+    } else {
+      items.push(el('div', { className: 'spell-popover-empty', textContent: 'No suggestions' }));
+    }
+
+    items.push(el('div', { className: 'spell-popover-sep' }));
+
+    const addDictBtn = el('button', { type: 'button', className: 'spell-popover-item', role: 'menuitem' }, `Add “${word}” to dictionary`) as HTMLButtonElement;
+    addDictBtn.addEventListener('mousedown', (e) => e.preventDefault());
+    addDictBtn.addEventListener('click', async () => {
+      hideSpellPopover();
+      spellIgnoredWords.add(word.toLowerCase());
+      spellMisspelledMap.delete(word);
+      refreshSpellDecorations();
+      try {
+        await bridge.addSpellWord?.(word);
+        showToast(`Added “${word}” to dictionary.`);
+      } catch {
+        showToast(`Ignored “${word}” for this session.`);
+      }
+    });
+    items.push(addDictBtn);
+
+    const ignoreBtn = el('button', { type: 'button', className: 'spell-popover-item', role: 'menuitem' }, 'Ignore for session') as HTMLButtonElement;
+    ignoreBtn.addEventListener('mousedown', (e) => e.preventDefault());
+    ignoreBtn.addEventListener('click', () => {
+      hideSpellPopover();
+      spellIgnoredWords.add(word.toLowerCase());
+      spellMisspelledMap.delete(word);
+      refreshSpellDecorations();
+    });
+    items.push(ignoreBtn);
+
+    spellPopoverEl.replaceChildren(...items);
+    spellPopoverEl.hidden = false;
+
+    const rect = spanEl.getBoundingClientRect();
+    const popWidth = spellPopoverEl.offsetWidth || 200;
+    const left = Math.min(Math.max(12, rect.left), window.innerWidth - popWidth - 12);
+    const top = rect.bottom + 6;
+    spellPopoverEl.style.left = `${Math.round(left)}px`;
+    spellPopoverEl.style.top = `${Math.round(top)}px`;
+  }
+
+  tiptapHostEl.addEventListener('click', (e) => {
+    const target = e.target as HTMLElement | null;
+    const spellSpan = target?.closest<HTMLElement>('.spell-error');
+    if (spellSpan) {
+      e.stopPropagation();
+      openSpellPopoverForSpan(spellSpan);
+    } else if (!spellPopoverEl.hidden) {
+      hideSpellPopover();
+    }
+  });
+
+  document.addEventListener('pointerdown', (e) => {
+    if (spellPopoverEl.hidden) return;
+    const target = e.target as Node | null;
+    if (target && !spellPopoverEl.contains(target) && !(target instanceof HTMLElement && target.closest('.spell-error'))) {
+      hideSpellPopover();
+    }
+  });
+
+  applySpellAttributesToDom();
 
   // --- Theme Handling ---
   const systemDarkMq = window.matchMedia('(prefers-color-scheme: dark)');
@@ -1098,7 +1665,9 @@ async function bootstrap(): Promise<void> {
   function updateStatsAndMetaUI(): void {
     const parsed = parseDocument(state.rawMarkdown);
     const stats = computeStats(parsed.body);
-    statsChip.textContent = `${stats.words} words · ${stats.readingMinutes} min read`;
+    const statsLabel = `${stats.words} words · ${stats.readingMinutes} min read`;
+    statsChipText.textContent = statsLabel;
+    floatingStatsText.textContent = statsLabel;
 
     if (document.activeElement !== titleInput) {
       titleInput.value = parsed.meta.title || '';
@@ -1111,9 +1680,10 @@ async function bootstrap(): Promise<void> {
       dateInput.value = parsed.meta.date || '';
     }
 
-    pathCodeEl.textContent = state.fullPath || `${state.activeProject}/${state.activeSlug}.md`;
-    pathCodeEl.title = pathCodeEl.textContent;
-    copyPathBtn.setAttribute('data-copy-value', pathCodeEl.textContent);
+    const rawDisplayPath = state.fullPath || `${state.activeProject}/${state.activeSlug}.md`;
+    pathCodeEl.textContent = formatSmartPath(rawDisplayPath);
+    pathCodeEl.title = rawDisplayPath;
+    copyPathBtn.setAttribute('data-copy-value', rawDisplayPath);
     handleFileEl.textContent = state.activeSlug ? `${state.activeSlug}.md` : 'Blog Studio';
     syncVisualTitleVisibility();
     syncVisualBlogChrome();
@@ -1128,13 +1698,36 @@ async function bootstrap(): Promise<void> {
     state.saving = true;
     updateSaveBadge('saving');
     try {
-      const res = await bridge.savePost(state.activeProject, state.activeSlug, state.rawMarkdown);
+      const res = await bridge.savePost(state.activeProject, state.activeSlug, state.rawMarkdown, {
+        baseContent: state.lastSavedMarkdown,
+        expectedMtimeMs: state.lastMtimeMs
+      });
       state.dirty = false;
       state.lastMtimeMs = res.mtimeMs;
       if (res.fullPath) {
         state.fullPath = res.fullPath;
-        pathCodeEl.textContent = res.fullPath;
+        pathCodeEl.textContent = formatSmartPath(res.fullPath);
+        pathCodeEl.title = res.fullPath;
         copyPathBtn.setAttribute('data-copy-value', res.fullPath);
+      }
+      if (res.merged && typeof res.content === 'string') {
+        const anchor = captureViewFocusAnchor(state.viewMode);
+        state.rawMarkdown = res.content;
+        state.lastSavedMarkdown = res.content;
+        if (editor) {
+          syncEditorContentFromRaw();
+          scheduleSpellCheck(true);
+        }
+        rawTextarea.value = state.rawMarkdown;
+        if (state.viewMode === 'raw') autoResizeRawTextarea();
+        if (state.viewMode === 'preview') await renderReadPreview();
+        updateStatsAndMetaUI();
+        window.requestAnimationFrame(() => {
+          restoreViewFocusAnchor(state.viewMode, anchor);
+        });
+        showToast('Merged external edit from disk.');
+      } else {
+        state.lastSavedMarkdown = state.rawMarkdown;
       }
       updateSaveBadge('saved');
       const parsed = parseDocument(state.rawMarkdown);
@@ -1284,9 +1877,42 @@ async function bootstrap(): Promise<void> {
     previewBodyEl.replaceChildren(...nodes);
   }
 
-  function autoResizeRawTextarea(): void {
+  function autoResizeRawTextarea(keepCaretComfortable = false): void {
+    const prevScrollX = window.scrollX;
+    const prevScrollY = window.scrollY;
+    const prevPaneHeight = rawPane.offsetHeight;
+
+    // Prevent the document from collapsing while measuring scrollHeight (which otherwise clamps window.scrollY
+    // and forces the browser to pin the caret at the bottom edge of the viewport on every keystroke).
+    if (prevPaneHeight > 0) {
+      rawPane.style.minHeight = `${prevPaneHeight}px`;
+    }
     rawTextarea.style.height = 'auto';
-    rawTextarea.style.height = `${Math.max(520, rawTextarea.scrollHeight + 24)}px`;
+    const bottomPadding = Math.max(160, Math.round(window.innerHeight * 0.3));
+    const nextHeight = Math.max(520, rawTextarea.scrollHeight + bottomPadding);
+    rawTextarea.style.height = `${nextHeight}px`;
+    rawPane.style.minHeight = '';
+
+    if (window.scrollX !== prevScrollX || window.scrollY !== prevScrollY) {
+      window.scrollTo({ left: prevScrollX, top: prevScrollY, behavior: 'instant' as ScrollBehavior });
+    }
+
+    if (keepCaretComfortable && document.activeElement === rawTextarea && state.viewMode === 'raw') {
+      const caret = rawTextarea.selectionEnd ?? rawTextarea.selectionStart ?? 0;
+      const caretOffsetTop = measureTextareaCaretOffsetTop(rawTextarea, caret);
+      const caretViewportY = rawTextarea.getBoundingClientRect().top + caretOffsetTop;
+      const linePx = parseFloat(window.getComputedStyle(rawTextarea).lineHeight) || state.rawFontSize * 1.72;
+      const bottomMargin = Math.max(96, Math.round(linePx * 3));
+      const topMargin = 64;
+
+      if (caretViewportY + linePx > window.innerHeight - bottomMargin) {
+        const delta = caretViewportY + linePx - (window.innerHeight - bottomMargin);
+        window.scrollTo({ left: prevScrollX, top: Math.max(0, window.scrollY + delta), behavior: 'instant' as ScrollBehavior });
+      } else if (caretViewportY < topMargin) {
+        const delta = caretViewportY - topMargin;
+        window.scrollTo({ left: prevScrollX, top: Math.max(0, window.scrollY + delta), behavior: 'instant' as ScrollBehavior });
+      }
+    }
   }
 
   // --- Medium Floating Bubble Menu & Gutter + Menu Logic ---
@@ -1564,6 +2190,74 @@ async function bootstrap(): Promise<void> {
       }
     });
 
+    const AutoCorrectExtension = Extension.create({
+      name: 'spellAutoCorrect',
+      addProseMirrorPlugins() {
+        return [
+          new Plugin({
+            key: spellDecoKey,
+            state: {
+              init: (_, { doc }) => buildSpellDecorations(doc),
+              apply: (tr, oldSet, _, newState) => {
+                if (tr.getMeta(spellDecoKey) || tr.docChanged) {
+                  return buildSpellDecorations(newState.doc);
+                }
+                return oldSet;
+              }
+            },
+            props: {
+              decorations(editorState) {
+                return spellDecoKey.getState(editorState);
+              },
+              handleTextInput(view, from, to, text) {
+                if (state.spellLang === 'off' || from !== to || text.length !== 1 || !isWordBoundaryChar(text)) {
+                  return false;
+                }
+                const $from = view.state.doc.resolve(from);
+                if ($from.parent.type.name === 'codeBlock') return false;
+                const marks = $from.marks();
+                if (marks.some((m) => m.type.name === 'code' || m.type.name === 'link')) return false;
+
+                const blockTextBefore = $from.parent.textBetween(0, $from.parentOffset, '\0', '\0');
+                const found = extractWordBeforeCaret(blockTextBefore, blockTextBefore.length);
+                if (!found) return false;
+
+                const replacement = lookupAutoCorrect(found.word, state.spellLang);
+                if (!replacement) return false;
+
+                const replaceFrom = from - found.word.length;
+                const tr = view.state.tr.insertText(`${replacement}${text}`, replaceFrom, to);
+                view.dispatch(tr);
+                return true;
+              },
+              handleKeyDown(view, event) {
+                if (state.spellLang === 'off' || event.key !== 'Enter' || event.metaKey || event.ctrlKey || event.altKey) {
+                  return false;
+                }
+                const { from, to, empty } = view.state.selection;
+                if (!empty) return false;
+                const $from = view.state.doc.resolve(from);
+                if ($from.parent.type.name === 'codeBlock') return false;
+                const marks = $from.marks();
+                if (marks.some((m) => m.type.name === 'code' || m.type.name === 'link')) return false;
+
+                const blockTextBefore = $from.parent.textBetween(0, $from.parentOffset, '\0', '\0');
+                const found = extractWordBeforeCaret(blockTextBefore, blockTextBefore.length);
+                if (!found) return false;
+
+                const replacement = lookupAutoCorrect(found.word, state.spellLang);
+                if (!replacement) return false;
+
+                const replaceFrom = from - found.word.length;
+                view.dispatch(view.state.tr.insertText(replacement, replaceFrom, to));
+                return false;
+              }
+            }
+          })
+        ];
+      }
+    });
+
     editor = new Editor({
       element: tiptapHostEl,
       extensions: [
@@ -1595,7 +2289,8 @@ async function bootstrap(): Promise<void> {
           placeholder: 'Tell your story, or click + on an empty line…'
         }),
         Typography,
-        MediumLinkShortcut
+        MediumLinkShortcut,
+        AutoCorrectExtension
       ],
       content: '',
       onUpdate: () => {
@@ -1616,6 +2311,7 @@ async function bootstrap(): Promise<void> {
         });
         updateStatsAndMetaUI();
         scheduleAutoSave();
+        scheduleSpellCheck(false);
       },
       onSelectionUpdate: () => updateMediumOverlays(),
       onFocus: () => updateMediumOverlays(),
@@ -1987,6 +2683,7 @@ async function bootstrap(): Promise<void> {
       syncEditorContentFromRaw();
       updateStatsAndMetaUI();
       updateMediumOverlays();
+      scheduleSpellCheck(true);
     } else if (nextMode === 'raw') {
       hideBubbleMenu();
       plusMenuEl.hidden = true;
@@ -2060,11 +2757,13 @@ async function bootstrap(): Promise<void> {
     state.fullPath = post.fullPath;
     state.lastMtimeMs = post.mtimeMs;
     state.rawMarkdown = post.content;
+    state.lastSavedMarkdown = post.content;
     state.dirty = false;
     updateSaveBadge('saved');
 
     if (editor) {
       syncEditorContentFromRaw();
+      scheduleSpellCheck(true);
     }
     rawTextarea.value = state.rawMarkdown;
     if (state.viewMode === 'raw') autoResizeRawTextarea();
@@ -2091,7 +2790,39 @@ async function bootstrap(): Promise<void> {
     updateRawMarkdownFromMetaPatch({ title: cleaned });
   });
 
+  function tryAutoCorrectTextarea(
+    inputEl: HTMLTextAreaElement,
+    event: KeyboardEvent,
+    checkMarkdownProtected: boolean
+  ): void {
+    if (state.spellLang === 'off' || event.metaKey || event.ctrlKey || event.altKey || event.isComposing) {
+      return;
+    }
+    const isBoundaryKey = event.key === 'Enter' || (event.key.length === 1 && isWordBoundaryChar(event.key));
+    if (!isBoundaryKey) return;
+
+    const start = inputEl.selectionStart;
+    const end = inputEl.selectionEnd;
+    if (start !== end || start < 2) return;
+
+    const val = inputEl.value;
+    if (checkMarkdownProtected && isRawMarkdownProtectedPos(val, start)) {
+      return;
+    }
+
+    const found = extractWordBeforeCaret(val, start);
+    if (!found) return;
+
+    const replacement = lookupAutoCorrect(found.word, state.spellLang);
+    if (!replacement) return;
+
+    inputEl.setSelectionRange(found.start, found.end);
+    inputEl.setRangeText(replacement, found.start, found.end, 'end');
+    inputEl.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+
   titleInput.addEventListener('keydown', (e) => {
+    tryAutoCorrectTextarea(titleInput, e, false);
     if (e.key === 'Enter') {
       e.preventDefault();
       editor?.commands.focus('start');
@@ -2104,12 +2835,13 @@ async function bootstrap(): Promise<void> {
 
   rawTextarea.addEventListener('input', () => {
     state.rawMarkdown = rawTextarea.value;
-    autoResizeRawTextarea();
+    autoResizeRawTextarea(true);
     updateStatsAndMetaUI();
     scheduleAutoSave();
   });
 
   rawTextarea.addEventListener('keydown', (e) => {
+    tryAutoCorrectTextarea(rawTextarea, e, true);
     const mod = e.metaKey || e.ctrlKey;
     if (e.key === 'Tab') {
       e.preventDefault();
@@ -2400,6 +3132,7 @@ async function bootstrap(): Promise<void> {
   window.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
       if (closeAllCustomSelects()) return;
+      hideSpellPopover();
       newDraftModal.hidden = true;
       imageModal.hidden = true;
       agentModal.hidden = true;
@@ -2484,6 +3217,7 @@ async function bootstrap(): Promise<void> {
   buildMediumBubbleToolbar();
   buildMediumPlusMenu();
   initTiptapEditor();
+  applySpellAttributesToDom();
 
   if (initConnection.initialPayload) {
     await applyInitPayload(initConnection.initialPayload);

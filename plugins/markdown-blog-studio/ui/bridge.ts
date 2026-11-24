@@ -72,13 +72,20 @@ export interface HostBridge {
   init(params?: { preferredProject?: string; preferredSlug?: string; preferredPostProject?: string }): Promise<StoreInitPayload>;
   getSiteTheme(): Promise<SiteThemePayload>;
   readPost(project: string, slug: string): Promise<PostPayload>;
-  savePost(project: string, slug: string, content: string): Promise<{ saved: boolean; mtimeMs: number; fullPath: string }>;
+  savePost(
+    project: string,
+    slug: string,
+    content: string,
+    mergeCtx?: { baseContent?: string; expectedMtimeMs?: number }
+  ): Promise<{ saved: boolean; mtimeMs: number; fullPath: string; merged?: boolean; content?: string }>;
   createPost(project: string, args: { title: string; slug?: string; status?: string }): Promise<PostPayload>;
   getMtime(project: string, slug: string): Promise<{ mtimeMs: number; focusTarget?: FocusTargetPayload | null } | null>;
   uploadAsset(project: string, file: { filename: string; base64Data: string; mimeType: string }): Promise<UploadAssetResult>;
   resolveAssetUrl(project: string, rawSrc: string): string;
   loadAssetDataUrl?(project: string, rawSrc: string): Promise<string | null>;
   sendToAgent(text: string): Promise<{ delivered: boolean; mode: string }>;
+  spellcheck?(lang: string, words: string[]): Promise<{ lang: string; misspelled: Record<string, string[]> }>;
+  addSpellWord?(word: string): Promise<{ added: boolean; word: string }>;
   popout?(project: string, slug: string, sidebars?: boolean): Promise<{ opened: boolean; url: string }>;
   syncModelContext?(summary: { project: string; slug: string; title: string; status: string; words: number }): Promise<void>;
   canToggleFullscreen?(): boolean;
@@ -141,51 +148,68 @@ async function httpRpc<T>(endpoint: string, body: Record<string, unknown>): Prom
 }
 
 function createHttpBridge(isSidecar: boolean, assetCache: Map<string, string>): HostBridge {
+  let activeBlogRoot: string | undefined;
+
   return {
     mode: isSidecar ? 'sidecar' : 'http',
 
     async init(params = {}) {
       let workspaceUri: string | undefined;
+      let workspaceUris: string[] | undefined;
       if (window.sidecar?.getWorkspaceUris) {
         try {
           const uris = await window.sidecar.getWorkspaceUris();
           if (Array.isArray(uris) && uris.length > 0) {
+            workspaceUris = uris;
             workspaceUri = uris[0];
           }
         } catch {
           // Ignore unavailable sidecar workspace APIs.
         }
       }
-      return httpRpc<StoreInitPayload>('/api/init', {
+      const res = await httpRpc<StoreInitPayload>('/api/init', {
+        blogRoot: activeBlogRoot,
         workspaceUri,
+        workspaceUris,
         preferredProject: params.preferredProject,
         preferredSlug: params.preferredSlug,
         preferredPostProject: params.preferredPostProject
       });
+      if (res?.blogRoot) {
+        activeBlogRoot = res.blogRoot;
+      }
+      return res;
     },
 
     async getSiteTheme() {
       try {
-        return await httpRpc<SiteThemePayload>('/api/site-theme', {});
+        return await httpRpc<SiteThemePayload>('/api/site-theme', { blogRoot: activeBlogRoot });
       } catch {
         return { available: false, siteName: '', css: '' };
       }
     },
 
     async readPost(project, slug) {
-      return httpRpc<PostPayload>('/api/read', { project, slug });
+      return httpRpc<PostPayload>('/api/read', { blogRoot: activeBlogRoot, project, slug });
     },
 
-    async savePost(project, slug, content) {
-      return httpRpc<{ saved: boolean; mtimeMs: number; fullPath: string }>('/api/save', {
-        project,
-        slug,
-        content
-      });
+    async savePost(project, slug, content, mergeCtx) {
+      return httpRpc<{ saved: boolean; mtimeMs: number; fullPath: string; merged?: boolean; content?: string }>(
+        '/api/save',
+        {
+          blogRoot: activeBlogRoot,
+          project,
+          slug,
+          content,
+          baseContent: mergeCtx?.baseContent,
+          expectedMtimeMs: mergeCtx?.expectedMtimeMs
+        }
+      );
     },
 
     async createPost(project, args) {
       return httpRpc<PostPayload>('/api/create', {
+        blogRoot: activeBlogRoot,
         project,
         title: args.title,
         slug: args.slug,
@@ -194,11 +218,16 @@ function createHttpBridge(isSidecar: boolean, assetCache: Map<string, string>): 
     },
 
     async getMtime(project, slug) {
-      return httpRpc<{ mtimeMs: number; focusTarget?: FocusTargetPayload | null }>('/api/mtime', { project, slug });
+      return httpRpc<{ mtimeMs: number; focusTarget?: FocusTargetPayload | null }>('/api/mtime', {
+        blogRoot: activeBlogRoot,
+        project,
+        slug
+      });
     },
 
     async uploadAsset(project, file) {
       const result = await httpRpc<UploadAssetResult>('/api/upload-asset', {
+        blogRoot: activeBlogRoot,
         project,
         filename: file.filename,
         base64Data: file.base64Data,
@@ -233,7 +262,11 @@ function createHttpBridge(isSidecar: boolean, assetCache: Map<string, string>): 
       const existing = assetCache.get(cacheKey);
       if (existing) return existing;
       const filename = clean.startsWith('assets/') ? clean.slice('assets/'.length) : clean;
-      const res = await httpRpc<{ dataUrl: string }>('/api/read-asset', { project, filename });
+      const res = await httpRpc<{ dataUrl: string }>('/api/read-asset', {
+        blogRoot: activeBlogRoot,
+        project,
+        filename
+      });
       if (res?.dataUrl) {
         assetCache.set(cacheKey, res.dataUrl);
         return res.dataUrl;
@@ -252,10 +285,23 @@ function createHttpBridge(isSidecar: boolean, assetCache: Map<string, string>): 
       return { delivered: false, mode: 'clipboard' };
     },
 
+    async spellcheck(lang, words) {
+      return httpRpc<{ lang: string; misspelled: Record<string, string[]> }>('/api/spellcheck', { lang, words });
+    },
+
+    async addSpellWord(word) {
+      return httpRpc<{ added: boolean; word: string }>('/api/spellcheck-add', { word });
+    },
+
     ...(isSidecar
       ? {
           async popout(project: string, slug: string, sidebars?: boolean) {
-            return httpRpc<{ opened: boolean; url: string }>('/api/popout', { project, slug, sidebars });
+            return httpRpc<{ opened: boolean; url: string }>('/api/popout', {
+              blogRoot: activeBlogRoot,
+              project,
+              slug,
+              sidebars
+            });
           }
         }
       : {})

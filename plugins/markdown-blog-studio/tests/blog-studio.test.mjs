@@ -23,7 +23,9 @@ import {
   validateIdentifier
 } from '../core/blog-store.mjs';
 import { computeStats, extractFrontmatterExtras, parseDocument, serializeDocument } from '../core/frontmatter.mjs';
+import { threeWayMerge } from '../core/merge.mjs';
 import { loadSiteTheme } from '../core/site-theme.mjs';
+import { checkWords } from '../core/spellchecker.mjs';
 import { startHttpFallbackServer } from '../sidecar/http-fallback.mjs';
 import { createHandlers } from '../sidecar/main.mjs';
 
@@ -387,4 +389,62 @@ test('8. Site theme loader reads and scopes public/resources/base.css + highligh
   assert.ok(theme.css.includes('.hljs-keyword'));
   assert.equal(theme.css.includes('@import'), false);
   assert.equal(theme.css.includes('font-size: 1.75em'), false);
+});
+
+test('9. Conflict-free 3-way auto-save merge and en-AU Hunspell spellcheck', async (t) => {
+  const base = [
+    '---',
+    'title: Test Post',
+    'status: draft',
+    '---',
+    '',
+    'A few weeks ago I recreated Paris in 3D.',
+    '',
+    'And here is the next paragraph.'
+  ].join('\n');
+
+  // Agent adds a link on line 6 while user adds a bullet list at the bottom.
+  const remote = base.replace(
+    'recreated Paris in 3D',
+    '[recreated Paris in 3D](/blog/eiffel-tower/paris-in-3d.html)'
+  );
+  const local = `${base}\n\n- Added bullet one\n- Added bullet two`;
+
+  const merged = threeWayMerge(base, local, remote);
+  assert.equal(merged.merged, true);
+  assert.ok(merged.content.includes('[recreated Paris in 3D](/blog/eiffel-tower/paris-in-3d.html)'));
+  assert.ok(merged.content.includes('- Added bullet one'));
+  assert.equal(merged.content.includes('<<<<<<<'), false);
+
+  // Same-line collision resolves cleanly to user's local edit with zero conflict markers.
+  const collision = threeWayMerge(
+    base,
+    base.replace('next paragraph.', 'user rewritten paragraph.'),
+    base.replace('next paragraph.', 'agent rewritten paragraph.')
+  );
+  assert.ok(collision.content.includes('user rewritten paragraph.'));
+  assert.equal(collision.content.includes('<<<<<<<'), false);
+
+  // End-to-end savePost with stale expectedMtimeMs merges cleanly on disk.
+  const tmpRoot = await makeTempDir('blog-studio-merge-');
+  t.after(async () => fs.rm(tmpRoot, { recursive: true, force: true }));
+  const firstSave = await savePost(tmpRoot, ROOT_PROJECT, 'concurrent', base);
+  await new Promise((r) => setTimeout(r, 25));
+  await savePost(tmpRoot, ROOT_PROJECT, 'concurrent', remote);
+  const mergedSave = await savePost(tmpRoot, ROOT_PROJECT, 'concurrent', local, {
+    baseContent: base,
+    expectedMtimeMs: firstSave.mtimeMs
+  });
+  assert.equal(mergedSave.merged, true);
+  assert.ok(mergedSave.content.includes('[recreated Paris in 3D](/blog/eiffel-tower/paris-in-3d.html)'));
+  assert.ok(mergedSave.content.includes('- Added bullet two'));
+
+  // Real en-AU dictionary check.
+  const spell = await checkWords('en-AU', ['colour', 'practising', 'practicing', 'speling', 'Antigravity']);
+  assert.equal(spell.misspelled.colour, undefined);
+  assert.equal(spell.misspelled.practising, undefined);
+  assert.equal(spell.misspelled.Antigravity, undefined);
+  assert.ok(Array.isArray(spell.misspelled.practicing));
+  assert.ok(spell.misspelled.practicing.includes('practising'));
+  assert.ok(spell.misspelled.speling.includes('spelling'));
 });

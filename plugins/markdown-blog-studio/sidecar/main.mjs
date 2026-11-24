@@ -7,6 +7,7 @@ import {
   getActiveTarget,
   getPostMtime,
   initStore,
+  isFallbackBlogRoot,
   readAsset,
   readPost,
   resolveBlogRoot,
@@ -17,30 +18,65 @@ import {
   validateProject
 } from '../core/blog-store.mjs';
 import { loadSiteTheme } from '../core/site-theme.mjs';
+import { addWordToUserDictionary, checkWords } from '../core/spellchecker.mjs';
 import { startHttpFallbackServer } from './http-fallback.mjs';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DIST_HTML_PATH = path.join(REPO_ROOT, 'dist', 'editor.html');
 
 export function createHandlers(options = {}) {
-  let cachedBlogRoot = options.blogRoot || null;
+  let cachedBlogRoot = options.blogRoot ? path.resolve(options.blogRoot) : null;
+  const knownBlogRoots = new Set(cachedBlogRoot ? [cachedBlogRoot] : []);
 
-  async function ensureBlogRoot(workspaceUri) {
+  async function ensureBlogRoot(payload = {}) {
     if (options.blogRoot) {
-      return resolveBlogRoot({ blogRoot: options.blogRoot });
+      const resolved = await resolveBlogRoot({ blogRoot: options.blogRoot });
+      knownBlogRoots.add(resolved);
+      return resolved;
     }
-    if (!cachedBlogRoot || workspaceUri) {
-      cachedBlogRoot = await resolveBlogRoot({ workspaceUri });
+
+    if (typeof payload?.blogRoot === 'string' && payload.blogRoot.trim()) {
+      const requested = path.resolve(payload.blogRoot.trim());
+      if (knownBlogRoots.has(requested)) {
+        return requested;
+      }
     }
+
+    const hasWorkspaceHint =
+      Boolean(payload?.workspaceUri) || (Array.isArray(payload?.workspaceUris) && payload.workspaceUris.length > 0);
+
+    if (!cachedBlogRoot || hasWorkspaceHint) {
+      const resolved = await resolveBlogRoot({
+        workspaceUri: payload?.workspaceUri,
+        workspaceUris: payload?.workspaceUris
+      });
+      knownBlogRoots.add(resolved);
+      // Never let a non-blog workspace's fallback blog-data/ clobber an already-resolved real blog root.
+      if (!cachedBlogRoot || !isFallbackBlogRoot(resolved) || isFallbackBlogRoot(cachedBlogRoot)) {
+        cachedBlogRoot = resolved;
+      }
+      return resolved;
+    }
+
     return cachedBlogRoot;
   }
 
   return {
+    selectDefaultBlogRoot(blogRoot) {
+      if (typeof blogRoot === 'string' && blogRoot.trim()) {
+        const normalized = path.resolve(blogRoot.trim());
+        if (knownBlogRoots.has(normalized)) {
+          cachedBlogRoot = normalized;
+        }
+      }
+    },
+
     async init(payload = {}) {
-      const blogRoot = await ensureBlogRoot(payload.workspaceUri);
+      const blogRoot = await ensureBlogRoot(payload);
       return initStore({
         blogRoot,
         workspaceUri: payload.workspaceUri,
+        workspaceUris: payload.workspaceUris,
         preferredProject: payload.preferredProject,
         preferredSlug: payload.preferredSlug,
         preferredPostProject: payload.preferredPostProject
@@ -48,22 +84,25 @@ export function createHandlers(options = {}) {
     },
 
     async siteTheme(payload = {}) {
-      const blogRoot = await ensureBlogRoot(payload.workspaceUri);
+      const blogRoot = await ensureBlogRoot(payload);
       return loadSiteTheme(blogRoot);
     },
 
     async read(payload = {}) {
-      const blogRoot = await ensureBlogRoot();
+      const blogRoot = await ensureBlogRoot(payload);
       return readPost(blogRoot, payload.project, payload.slug);
     },
 
     async save(payload = {}) {
-      const blogRoot = await ensureBlogRoot();
-      return savePost(blogRoot, payload.project, payload.slug, payload.content);
+      const blogRoot = await ensureBlogRoot(payload);
+      return savePost(blogRoot, payload.project, payload.slug, payload.content, {
+        baseContent: payload.baseContent,
+        expectedMtimeMs: payload.expectedMtimeMs
+      });
     },
 
     async create(payload = {}) {
-      const blogRoot = await ensureBlogRoot();
+      const blogRoot = await ensureBlogRoot(payload);
       return createPost(blogRoot, payload.project, {
         title: payload.title,
         slug: payload.slug,
@@ -72,7 +111,7 @@ export function createHandlers(options = {}) {
     },
 
     async mtime(payload = {}) {
-      const blogRoot = await ensureBlogRoot();
+      const blogRoot = await ensureBlogRoot(payload);
       const [mtimeRes, focusTarget] = await Promise.all([
         getPostMtime(blogRoot, payload.project, payload.slug),
         getActiveTarget(blogRoot)
@@ -84,12 +123,12 @@ export function createHandlers(options = {}) {
     },
 
     async focusPost(payload = {}) {
-      const blogRoot = await ensureBlogRoot();
+      const blogRoot = await ensureBlogRoot(payload);
       return setActiveTarget(blogRoot, payload.project, payload.slug);
     },
 
     async uploadAsset(payload = {}) {
-      const blogRoot = await ensureBlogRoot();
+      const blogRoot = await ensureBlogRoot(payload);
       return saveAsset(blogRoot, payload.project, {
         filename: payload.filename,
         base64Data: payload.base64Data,
@@ -98,18 +137,26 @@ export function createHandlers(options = {}) {
     },
 
     async readAssetBinary(payload = {}) {
-      const blogRoot = await ensureBlogRoot();
+      const blogRoot = await ensureBlogRoot(payload);
       return readAsset(blogRoot, payload.project, payload.filename);
     },
 
     async readAssetDataUrl(payload = {}) {
-      const blogRoot = await ensureBlogRoot();
+      const blogRoot = await ensureBlogRoot(payload);
       const asset = await readAsset(blogRoot, payload.project, payload.filename);
       return {
         filename: asset.filename,
         mimeType: asset.mimeType,
         dataUrl: `data:${asset.mimeType};base64,${asset.buffer.toString('base64')}`
       };
+    },
+
+    async spellcheck(payload = {}) {
+      return checkWords(payload.lang, payload.words);
+    },
+
+    async spellcheckAdd(payload = {}) {
+      return addWordToUserDictionary(payload.word);
     }
   };
 }
@@ -193,7 +240,12 @@ async function main() {
     app.api('/api/upload-asset', (data) => handlers.uploadAsset(data));
     app.api('/api/read-asset', (data) => handlers.readAssetDataUrl(data));
     app.api('/api/site-theme', (data) => handlers.siteTheme(data));
+    app.api('/api/spellcheck', (data) => handlers.spellcheck(data));
+    app.api('/api/spellcheck-add', (data) => handlers.spellcheckAdd(data));
     app.api('/api/popout', async (data = {}) => {
+      if (typeof data.blogRoot === 'string' && data.blogRoot.trim()) {
+        handlers.selectDefaultBlogRoot(data.blogRoot);
+      }
       const srv = await ensurePopoutServer();
       const params = new URLSearchParams();
       if (typeof data.project === 'string' && data.project.trim()) {

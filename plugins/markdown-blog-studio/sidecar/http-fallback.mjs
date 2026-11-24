@@ -180,7 +180,9 @@ export async function startHttpFallbackServer({
           '/api/focus': handlers.focusPost,
           '/api/upload-asset': handlers.uploadAsset,
           '/api/read-asset': handlers.readAssetDataUrl,
-          '/api/site-theme': handlers.siteTheme
+          '/api/site-theme': handlers.siteTheme,
+          '/api/spellcheck': handlers.spellcheck,
+          '/api/spellcheck-add': handlers.spellcheckAdd
         };
 
         const handler = routes[pathname];
