@@ -10,6 +10,7 @@ import {
   isFallbackBlogRoot,
   readAsset,
   readPost,
+  rememberLastOpenedPost,
   resolveBlogRoot,
   saveAsset,
   savePost,
@@ -90,24 +91,30 @@ export function createHandlers(options = {}) {
 
     async read(payload = {}) {
       const blogRoot = await ensureBlogRoot(payload);
-      return readPost(blogRoot, payload.project, payload.slug);
+      const post = await readPost(blogRoot, payload.project, payload.slug);
+      await rememberLastOpenedPost(blogRoot, post.project, post.slug);
+      return post;
     },
 
     async save(payload = {}) {
       const blogRoot = await ensureBlogRoot(payload);
-      return savePost(blogRoot, payload.project, payload.slug, payload.content, {
+      const saved = await savePost(blogRoot, payload.project, payload.slug, payload.content, {
         baseContent: payload.baseContent,
         expectedMtimeMs: payload.expectedMtimeMs
       });
+      await rememberLastOpenedPost(blogRoot, saved.project, saved.slug);
+      return saved;
     },
 
     async create(payload = {}) {
       const blogRoot = await ensureBlogRoot(payload);
-      return createPost(blogRoot, payload.project, {
+      const created = await createPost(blogRoot, payload.project, {
         title: payload.title,
         slug: payload.slug,
         status: payload.status
       });
+      await rememberLastOpenedPost(blogRoot, created.project, created.slug);
+      return created;
     },
 
     async mtime(payload = {}) {

@@ -134,10 +134,34 @@ export function isFallbackBlogRoot(blogRoot) {
   );
 }
 
-async function readUserDefaultBlogRoot() {
+async function readUserConfig() {
   try {
     const raw = await fs.readFile(USER_CONFIG_PATH, 'utf8');
     const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+async function writeUserConfig(nextConfig) {
+  try {
+    await fs.mkdir(USER_CONFIG_DIR, { recursive: true });
+    await fs.writeFile(USER_CONFIG_PATH, `${JSON.stringify(nextConfig, null, 2)}\n`, 'utf8');
+  } catch {
+    // Non-fatal if home config cannot be written.
+  }
+}
+
+function isTempDirPath(dirPath) {
+  const resolved = path.resolve(dirPath);
+  const tmp = path.resolve(os.tmpdir());
+  return resolved === tmp || resolved.startsWith(tmp + path.sep);
+}
+
+async function readUserDefaultBlogRoot() {
+  try {
+    const parsed = await readUserConfig();
     const candidate = typeof parsed?.defaultBlogRoot === 'string' ? parsed.defaultBlogRoot.trim() : '';
     if (!candidate) return null;
     const resolved = path.resolve(candidate);
@@ -151,21 +175,40 @@ async function readUserDefaultBlogRoot() {
 }
 
 export async function rememberUserDefaultBlogRoot(blogRoot) {
-  if (!blogRoot || isFallbackBlogRoot(blogRoot)) return;
+  if (!blogRoot || isFallbackBlogRoot(blogRoot) || isTempDirPath(blogRoot)) return;
+  const resolved = path.resolve(blogRoot);
+  const existing = await readUserConfig();
+  if (existing.defaultBlogRoot === resolved) return;
+  await writeUserConfig({ ...existing, defaultBlogRoot: resolved });
+}
+
+export async function readLastOpenedPost(blogRoot) {
+  if (!blogRoot || isTempDirPath(blogRoot)) return null;
   try {
     const resolved = path.resolve(blogRoot);
-    await fs.mkdir(USER_CONFIG_DIR, { recursive: true });
-    let existing = {};
-    try {
-      const raw = await fs.readFile(USER_CONFIG_PATH, 'utf8');
-      const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed === 'object') existing = parsed;
-    } catch {
-      // No existing config yet.
-    }
-    if (existing.defaultBlogRoot === resolved) return;
-    const next = { ...existing, defaultBlogRoot: resolved };
-    await fs.writeFile(USER_CONFIG_PATH, `${JSON.stringify(next, null, 2)}\n`, 'utf8');
+    const cfg = await readUserConfig();
+    const entry = cfg?.lastOpenedByRoot?.[resolved];
+    if (!entry || typeof entry !== 'object') return null;
+    const project = validateProject(entry.project);
+    const slug = normalizeSlug(entry.slug);
+    return { project, slug };
+  } catch {
+    return null;
+  }
+}
+
+export async function rememberLastOpenedPost(blogRoot, project, slug) {
+  if (!blogRoot || isTempDirPath(blogRoot)) return;
+  try {
+    const resolved = path.resolve(blogRoot);
+    const safeProject = validateProject(project);
+    const safeSlug = normalizeSlug(slug);
+    const existing = await readUserConfig();
+    const map = existing.lastOpenedByRoot && typeof existing.lastOpenedByRoot === 'object' ? { ...existing.lastOpenedByRoot } : {};
+    const prev = map[resolved];
+    if (prev && prev.project === safeProject && prev.slug === safeSlug) return;
+    map[resolved] = { project: safeProject, slug: safeSlug, updatedAt: Date.now() };
+    await writeUserConfig({ ...existing, lastOpenedByRoot: map });
   } catch {
     // Non-fatal if home config cannot be written.
   }
@@ -818,6 +861,14 @@ export async function initStore(options = {}) {
     if (recentTarget && Date.now() - recentTarget.requestedAt <= RECENT_FOCUS_WINDOW_MS) {
       desiredSlug = recentTarget.slug;
       desiredPostProject = recentTarget.project;
+    }
+  }
+
+  if (!desiredSlug && options.useUserDefault !== false) {
+    const lastOpened = await readLastOpenedPost(blogRoot);
+    if (lastOpened) {
+      desiredSlug = lastOpened.slug;
+      desiredPostProject = lastOpened.project;
     }
   }
 
